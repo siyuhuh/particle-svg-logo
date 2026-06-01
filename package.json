@@ -1,0 +1,27 @@
+{
+  "name": "particle-svg-logo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@react-three/drei": "10.7.7",
+    "@react-three/fiber": "9.6.1",
+    "@react-three/postprocessing": "3.0.4",
+    "lucide-react": "1.16.0",
+    "postprocessing": "6.39.1",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "three": "0.182.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.15",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "typescript": "6.0.3",
+    "vite": "8.0.13"
+  }
+}
