@@ -607,28 +607,38 @@ export function WebcamWalkersOverlay({
       // so it can never trap the crowd out of formation forever.
       const handFullSpeed = Math.max(2.4, cssW * 0.004);
       // Panic: while a MOVING hand is on them they scurry faster + a bit chaotically.
-      // panicGain = extra pace, panicNoise = time-varying heading wobble (radians),
-      // fleeCadence = extra leg-pumping so the steps read as hurried, not a glide.
+      // panicGain = extra pace, panicNoise = time-varying heading wobble (radians). The
+      // leg cadence follows the travel speed automatically (foot-locked), so fast = hurried.
       const panicGain = 0.25 + clamp(cfg.mouseForce, 0, 3) * 0.3;
       const panicNoise = 0.32 + clamp(cfg.turbulence, 0, 1) * 0.95;
-      const fleeCadence = 0.55 + cfg.animationSpeed * 0.6;
-      // Return is BRISK when far (hurrying back) and eases near home.
-      const returnSpeed = (2.4 + cfg.attractRadius * 2.4) * cssW * 0.0016;
-      const returnStiffness = clamp(0.07 + cfg.attractRadius * 0.06, 0.05, 0.18);
-      const returnAccel = clamp(0.2 + cfg.attractRadius * 0.12, 0.16, 0.36);
+      // Return is an adjustable stroll: walkerReturnSpeed 0 → a slow amble, 1 → brisk.
+      // Far walkers cap at this pace; near ones ease in (so they arrive, not overshoot).
+      const returnSpeed = (0.6 + clamp(cfg.walkerReturnSpeed, 0, 1) * 3.4) * cssW * 0.0016;
+      const returnStiffness = 0.06 + clamp(cfg.walkerReturnSpeed, 0, 1) * 0.05;
+      // Low accel = they pick up walking pace gradually instead of snapping to speed.
+      const returnAccel = 0.1 + clamp(cfg.walkerReturnSpeed, 0, 1) * 0.1;
+      // How much they curve / meander on the way home instead of beelining (0 = straight).
+      const wanderAmt = clamp(cfg.walkerWander, 0, 1);
       const homeDamping = Math.pow(0.86, dt);
       // Shoved aside then left alone → a step or two and stop, standing as a pile.
       const pileDamping = Math.pow(0.82, dt);
       const maxSpeed = Math.max(fleeSpeed * (1 + panicGain), returnSpeed) * 1.3;
       const idleRate = 0.05 * Math.max(0.15, cfg.animationSpeed);
-      // Legs pump with actual travel speed → a real walk cadence when they move.
-      const travelGain = 0.085 * Math.max(0.4, cfg.animationSpeed);
       // Once the hand LEAVES the frame, displacement fades → they commit to walking
       // home; while a hand is still on screen, piles persist (worked area stays clean).
       const releaseFade = clamp(0.085 * Math.max(0.3, cfg.animationSpeed * 2), 0.04, 0.2);
       // Bounded sway around home → the standing crowd shuffles without drifting away.
       const spacing = (Math.min(cssW, cssH) * 0.78) / Math.max(1, gridRef.current);
       const swayAmp = spacing * (0.12 + cfg.turbulence * 0.5);
+      // On-screen figure size (mirrors the render size below) and the ground distance a
+      // full 2-step gait should cover — used to FOOT-LOCK the legs so a stride matches the
+      // distance travelled (no sliding). Walk cadence shortens the stride → more steps.
+      const figureBase = clamp(spacing * 1.7, 8, 46);
+      const figureSize = figureBase * clamp(cfg.pointSize / 1.6, 0.55, 2.6);
+      const strideCycle = Math.max(
+        6,
+        figureSize * 0.6 * (0.4 / clamp(cfg.animationSpeed, 0.2, 1.2))
+      );
       const t = now * 0.001;
 
       // Any hand in frame keeps the gate open (piles hold); empty frame → fade home.
@@ -700,7 +710,6 @@ export function WebcamWalkersOverlay({
 
           // Hand on them → turn and WALK away. Strength scales with proximity AND hand
           // speed, so a sweep shoves hard while a resting hand only nudges.
-          let legBoost = 0;
           if (infl > 0.02) {
             const drive = clamp(handSpd / handFullSpeed, 0.16, 1);
             // Messy panic: a per-walker, time-varying heading wobble (only while the
@@ -712,7 +721,6 @@ export function WebcamWalkersOverlay({
             const pace = fleeSpeed * wkr.sMul * infl * drive * panic;
             wkr.vx += (Math.cos(ang) * pace - wkr.vx) * fleeAccel * dt;
             wkr.vy += (Math.sin(ang) * pace - wkr.vy) * fleeAccel * dt;
-            legBoost = drive * infl;
             if (infl * drive > 0.1) {
               wkr.disp = 1;
             }
@@ -725,8 +733,9 @@ export function WebcamWalkersOverlay({
             wkr.vx *= pileDamping;
             wkr.vy *= pileDamping;
           } else {
-            // Walk home — speed scales with distance (brisk far, easing near) and with
-            // how settled they are, capped at a hurried walking pace.
+            // Walk home at the chosen stroll pace — brisk while far, easing as they
+            // arrive. They DON'T beeline: a per-person side bias + a slow meander curve
+            // the route (a "walking around" feel) and it straightens out near home.
             const tx = wkr.hx + snoise(t * 0.5, wkr.wSeed) * swayAmp;
             const ty = wkr.hy + snoise(t * 0.5 + 17.3, wkr.wSeed + 4) * swayAmp;
             const dx = tx - wkr.x;
@@ -734,8 +743,24 @@ export function WebcamWalkersOverlay({
             const dist = Math.hypot(dx, dy) || 1;
             const want = Math.min(returnSpeed, dist * returnStiffness) * wkr.sMul;
             const inv = 1 / dist;
-            wkr.vx += (dx * inv * want - wkr.vx) * returnAccel * dt;
-            wkr.vy += (dy * inv * want - wkr.vy) * returnAccel * dt;
+            let nx = dx * inv;
+            let ny = dy * inv;
+            // Curve fades to zero near home so they converge; far away they sweep wide.
+            const arc = wanderAmt * clamp(dist / (spacing * 5), 0, 1);
+            if (arc > 0.001) {
+              const side = (hash(wkr.wSeed + 9) - 0.5) * 2;
+              const meander = snoise(t * 0.22, wkr.wSeed * 1.7);
+              // Rotate the heading, bounded < ~70° so a homeward component always remains.
+              const turn = clamp((side * 0.7 + meander * 0.9) * arc, -1.2, 1.2);
+              const c = Math.cos(turn);
+              const s = Math.sin(turn);
+              const rx = nx * c - ny * s;
+              const ry = nx * s + ny * c;
+              nx = rx;
+              ny = ry;
+            }
+            wkr.vx += (nx * want - wkr.vx) * returnAccel * dt;
+            wkr.vy += (ny * want - wkr.vy) * returnAccel * dt;
             wkr.vx *= homeDamping;
             wkr.vy *= homeDamping;
           }
@@ -756,13 +781,15 @@ export function WebcamWalkersOverlay({
           const heatRate = heatTarget > wkr.heat ? 0.3 : 0.05;
           wkr.heat += (heatTarget - wkr.heat) * clamp(heatRate * dt, 0, 1);
 
-          // Leg cycle is driven by travel speed (reads as walking) + a frantic boost
-          // while the hand shoves them (quick, hurried steps), plus a per-walker idle.
+          // Foot-locked gait: the leg cycle advances with DISTANCE travelled, so each
+          // stride covers the ground it visually should — they move exactly as fast as
+          // they walk (no gliding / moonwalking). A faint idle shuffle keeps the standing
+          // crowd alive and fades out the instant they start walking.
           const idleVar = 0.55 + hash(wkr.wSeed + 7) * 0.9;
+          const travelPhase = (sp / strideCycle) * twoPi * dt;
+          const idleFade = clamp(1 - sp / 0.6, 0, 1);
           wkr.phase =
-            (wkr.phase +
-              (idleRate * idleVar + sp * travelGain + legBoost * fleeCadence) * dt) %
-            twoPi;
+            (wkr.phase + travelPhase + idleRate * idleVar * idleFade * dt) % twoPi;
           if (wkr.vx > 0.3) {
             wkr.face = 1;
           } else if (wkr.vx < -0.3) {
@@ -781,11 +808,9 @@ export function WebcamWalkersOverlay({
         ctx.fillRect(0, 0, cssW, cssH);
       }
 
-      // Size from the lattice spacing so neighbours slightly overlap → continuous
-      // strokes and solid fills (no broken outlines), consistent across any SVG.
-      const latticeSpacing = (Math.min(cssW, cssH) * 0.78) / Math.max(1, gridRef.current);
-      const baseSize = clamp(latticeSpacing * 1.7, 8, 46);
-      const size = baseSize * clamp(cfg.pointSize / 1.6, 0.55, 2.6);
+      // Draw at the figure size used for the gait foot-lock above (kept identical so the
+      // stride matches the rendered legs). Neighbours slightly overlap → continuous fills.
+      const size = figureSize;
       const half = size / 2;
       ctx.imageSmoothingEnabled = true;
       // Back-to-front: smaller y (farther) drawn first, larger y (nearer) drawn last,

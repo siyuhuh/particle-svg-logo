@@ -57,6 +57,8 @@ const BASE_EFFECT_SETTINGS: EffectSettings = {
   maskRoughness: 0,
   surfaceDepth: 0,
   animationSpeed: 0.45,
+  walkerReturnSpeed: 0.4,
+  walkerWander: 0.5,
   gridVisible: true,
   renderMode: "webgl"
 };
@@ -490,6 +492,8 @@ const EFFECT_SETTING_PRESETS: Record<LogoStyle, EffectSettings> = {
     repelRadius: 0.5,
     flicker: 0.3,
     breathe: 0.3,
+    walkerReturnSpeed: 0.32,
+    walkerWander: 0.55,
     gridVisible: false,
     animationSpeed: 0.4
   }
@@ -2861,6 +2865,74 @@ export default function App() {
                 value={settings.animationSpeed}
                 min={0.25}
                 max={2.4}
+                step={0.05}
+                onChange={(value) => updateSetting("animationSpeed", value)}
+              />
+            </>
+          ) : settings.logoStyle === "walkers" ? (
+            <>
+              <SliderControl
+                label="Crowd"
+                value={settings.particleCount}
+                min={2000}
+                max={24000}
+                step={1000}
+                format={(value) => `${Math.round(value / 1000)}k`}
+                onChange={(value) => updateSetting("particleCount", value)}
+              />
+              <SliderControl
+                label="Figure size"
+                value={settings.pointSize}
+                min={0.8}
+                max={3.5}
+                step={0.1}
+                onChange={(value) => updateSetting("pointSize", value)}
+              />
+              <SliderControl
+                label="Push force"
+                value={settings.mouseForce}
+                min={0.2}
+                max={2.5}
+                step={0.05}
+                onChange={(value) => updateSetting("mouseForce", value)}
+              />
+              <SliderControl
+                label="Hand reach"
+                value={settings.repelRadius}
+                min={0.15}
+                max={1}
+                step={0.02}
+                onChange={(value) => updateSetting("repelRadius", value)}
+              />
+              <SliderControl
+                label="Return speed"
+                value={settings.walkerReturnSpeed}
+                min={0}
+                max={1}
+                step={0.02}
+                onChange={(value) => updateSetting("walkerReturnSpeed", value)}
+              />
+              <SliderControl
+                label="Wander"
+                value={settings.walkerWander}
+                min={0}
+                max={1}
+                step={0.02}
+                onChange={(value) => updateSetting("walkerWander", value)}
+              />
+              <SliderControl
+                label="Messiness"
+                value={settings.turbulence}
+                min={0}
+                max={1}
+                step={0.02}
+                onChange={(value) => updateSetting("turbulence", value)}
+              />
+              <SliderControl
+                label="Walk cadence"
+                value={settings.animationSpeed}
+                min={0.15}
+                max={1.2}
                 step={0.05}
                 onChange={(value) => updateSetting("animationSpeed", value)}
               />

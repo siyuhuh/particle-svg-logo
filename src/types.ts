@@ -54,6 +54,10 @@ export type ParticleSettings = {
   maskRoughness: number;
   surfaceDepth: number;
   animationSpeed: number;
+  /** Walkers: how fast the crowd strolls back home after being shoved (0 = slow). */
+  walkerReturnSpeed: number;
+  /** Walkers: how much they curve/meander on the way home instead of beelining. */
+  walkerWander: number;
   gridVisible: boolean;
   renderMode: RenderMode;
 };
