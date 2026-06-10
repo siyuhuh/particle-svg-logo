@@ -475,6 +475,23 @@ const EFFECT_SETTING_PRESETS: Record<LogoStyle, EffectSettings> = {
     flicker: 0.82,
     breathe: 0.08,
     animationSpeed: 0.55
+  },
+  walkers: {
+    ...BASE_EFFECT_SETTINGS,
+    particleColor: "#f8fcff",
+    particleAccentColor: "#7be0a8",
+    particleHighlightColor: "#ffffff",
+    particleCount: 12000,
+    pointSize: 1.6,
+    turbulence: 0.4,
+    scatterRadius: 0.6,
+    mouseForce: 0.85,
+    attractRadius: 0.45,
+    repelRadius: 0.5,
+    flicker: 0.3,
+    breathe: 0.3,
+    gridVisible: false,
+    animationSpeed: 0.4
   }
 };
 
@@ -490,6 +507,7 @@ const LOGO_STYLES: Array<{
   { id: "ascii", label: "ASCII", hudLabel: "ASCII", detail: "glyph particle field" },
   { id: "ascii2", label: "ASCII 2", hudLabel: "ASCII 2", detail: "raster text filter" },
   { id: "fancy", label: "Fancy", hudLabel: "FANCY", detail: "layered SVG strokes" },
+  { id: "walkers", label: "Walkers", hudLabel: "WALKERS", detail: "webcam crowd flow" },
   { id: "metal", label: "Metal", hudLabel: "METAL", detail: "extruded silver 3D" },
   { id: "mercury", label: "Mercury", hudLabel: "MERCURY", detail: "liquid chrome relief" },
   { id: "chrome", label: "Chrome", hudLabel: "CHROME", detail: "prismatic flow metal" },
@@ -1434,6 +1452,8 @@ export default function App() {
                 ? "ASCII raster controls"
                 : settings.logoStyle === "fancy"
                 ? "Fancy stroke controls"
+                : settings.logoStyle === "walkers"
+                ? "Webcam crowd controls"
                 : "Shader controls"}
             </span>
           </div>
@@ -3113,6 +3133,8 @@ export default function App() {
                 ? "GAZE TYPING FIELD"
                 : settings.logoStyle === "vfx"
                 ? "VFX THRU SHADOW"
+                : settings.logoStyle === "walkers"
+                ? "WEBCAM CROWD FLOW"
                 : isSurfaceLogoStyle(settings.logoStyle)
                 ? "SVG MASK SHADER"
                 : `${settings.particleCount.toLocaleString()} PARTICLES`}

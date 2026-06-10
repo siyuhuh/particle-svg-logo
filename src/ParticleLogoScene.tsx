@@ -13,6 +13,7 @@ import {
   SURFACE_PLANE_WORLD_SIZE
 } from "./sceneSizing";
 import { sampleSvgToParticles } from "./svgSampler";
+import { WebcamWalkersOverlay } from "./WebcamWalkersOverlay";
 import type { LogoStyle, ParticleBuffers, ParticleSettings } from "./types";
 
 type ParticleLogoSceneProps = {
@@ -1906,16 +1907,25 @@ export function ParticleLogoScene({
   const asciiStyle = settings.logoStyle === "ascii";
   const asciiRasterStyle = settings.logoStyle === "ascii2";
   const fancyStyle = settings.logoStyle === "fancy";
+  const walkersStyle = settings.logoStyle === "walkers";
   const asciiParticleCount = Math.min(
     5600,
     Math.max(1800, Math.round(settings.particleCount * 0.28))
   );
   const buffers = useMemo(
     () =>
-      surfaceStyle || asciiStyle || asciiRasterStyle || fancyStyle
+      surfaceStyle || asciiStyle || asciiRasterStyle || fancyStyle || walkersStyle
         ? null
         : sampleSvgToParticles(svgText, settings.particleCount, 19),
-    [asciiRasterStyle, asciiStyle, fancyStyle, settings.particleCount, surfaceStyle, svgText]
+    [
+      asciiRasterStyle,
+      asciiStyle,
+      fancyStyle,
+      walkersStyle,
+      settings.particleCount,
+      surfaceStyle,
+      svgText
+    ]
   );
   const asciiBuffers = useMemo(
     () => (asciiStyle ? sampleSvgToParticles(svgText, asciiParticleCount, 23) : null),
@@ -2006,6 +2016,14 @@ export function ParticleLogoScene({
       )}
       {fancyStyle && (
         <FancyLetterOverlay
+          svgText={svgText}
+          settings={settings}
+          replayNonce={replayNonce}
+          paused={paused}
+        />
+      )}
+      {walkersStyle && (
+        <WebcamWalkersOverlay
           svgText={svgText}
           settings={settings}
           replayNonce={replayNonce}

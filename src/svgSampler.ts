@@ -63,6 +63,7 @@ export function sampleSvgToParticles(
         subPath.getSpacedPoints(divisions).forEach((point) => {
           edgePoints.push({ x: point.x, y: point.y, edge: true });
         });
+        sampleAutoCloseSegment(subPath, edgePoints);
       });
     }
   });
@@ -264,6 +265,33 @@ function collectShapeTriangles(shape: THREE.Shape, triangles: TriangleSample[]) 
   }
 
   geometry.dispose();
+}
+
+// A `Z` close command marks the subpath `autoClose` but DOESN'T add a curve for
+// the closing segment, so getSpacedPoints() skips it and the shape looks "open"
+// (e.g. the missing left edge of a drawn rectangle). Sample that segment by hand.
+function sampleAutoCloseSegment(subPath: THREE.Path, edgePoints: RawPoint[]) {
+  const curves = subPath.curves;
+  if (!subPath.autoClose || curves.length === 0) {
+    return;
+  }
+
+  const start = curves[0].getPoint(0);
+  const end = curves[curves.length - 1].getPoint(1);
+  const segLength = start.distanceTo(end);
+  if (segLength <= 1e-4) {
+    return;
+  }
+
+  const divisions = clamp(Math.ceil(segLength / 2.6), 2, 800);
+  for (let i = 1; i <= divisions; i += 1) {
+    const t = i / divisions;
+    edgePoints.push({
+      x: end.x + (start.x - end.x) * t,
+      y: end.y + (start.y - end.y) * t,
+      edge: true
+    });
+  }
 }
 
 function collectShapeEdges(shape: THREE.Shape, edgePoints: RawPoint[]) {

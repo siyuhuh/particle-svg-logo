@@ -32,7 +32,8 @@ export type LogoStyle =
   | "vfx"
   | "ascii"
   | "ascii2"
-  | "fancy";
+  | "fancy"
+  | "walkers";
 
 export type ParticleSettings = {
   logoStyle: LogoStyle;
