@@ -534,6 +534,16 @@ const LOGO_STYLES: Array<{
   { id: "vfx", label: "VFX", hudLabel: "VFX", detail: "thru light shadow" }
 ];
 
+const LOGO_STYLE_IDS = new Set<string>(LOGO_STYLES.map((style) => style.id));
+
+function readLogoStyleFromUrl(): LogoStyle {
+  if (typeof window === "undefined") {
+    return "dust";
+  }
+  const slug = window.location.pathname.replace(/^\/+|\/+$/g, "").toLowerCase();
+  return LOGO_STYLE_IDS.has(slug) ? (slug as LogoStyle) : "dust";
+}
+
 const FANCY_VARIANTS: Array<{
   id: FancyVariant;
   label: string;
@@ -621,7 +631,7 @@ function copyTextWithFallback(text: string) {
 }
 
 export default function App() {
-  const [logoStyle, setLogoStyle] = useState<LogoStyle>("dust");
+  const [logoStyle, setLogoStyle] = useState<LogoStyle>(readLogoStyleFromUrl);
   const [settingsByStyle, setSettingsByStyle] =
     useState<Record<LogoStyle, EffectSettings>>(EFFECT_SETTING_PRESETS);
   const [draftSvg, setDraftSvg] = useState(DEFAULT_SVG);
@@ -696,6 +706,13 @@ export default function App() {
     setWebglSupported(detectWebGlSupport());
     setWebgpuSupported(typeof navigator !== "undefined" && "gpu" in navigator);
   }, []);
+
+  useEffect(() => {
+    const path = logoStyle === "dust" ? "/" : `/${logoStyle}`;
+    if (window.location.pathname !== path) {
+      window.history.replaceState(null, "", `${path}${window.location.search}`);
+    }
+  }, [logoStyle]);
 
   useEffect(() => {
     if (jsonCopyStatus !== "selected") {
