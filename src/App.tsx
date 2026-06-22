@@ -13,8 +13,10 @@ import {
   Expand,
   FileCode2,
   Grid3X3,
+  Layers,
   Minimize2,
   Minus,
+  Pause,
   PenLine,
   Play,
   RefreshCcw,
@@ -23,7 +25,8 @@ import {
   Square,
   Trash2,
   Undo2,
-  Upload
+  Upload,
+  X
 } from "lucide-react";
 import { DEFAULT_SVG } from "./defaultLogo";
 import { ParticleLogoScene } from "./ParticleLogoScene";
@@ -655,7 +658,9 @@ export default function App() {
   const [inputError, setInputError] = useState<string | null>(null);
   const [replayNonce, setReplayNonce] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
-  const [panelVisible, setPanelVisible] = useState(true);
+  const [panelVisible, setPanelVisible] = useState(() =>
+    typeof window !== "undefined" && window.matchMedia("(max-width: 768px)").matches ? false : true
+  );
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [jsonCopyStatus, setJsonCopyStatus] =
     useState<"idle" | "copied" | "selected">("idle");
@@ -716,6 +721,21 @@ export default function App() {
       window.history.replaceState(null, "", `${path}${window.location.search}`);
     }
   }, [logoStyle]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 768px)");
+    const syncMobileDefaults = (event?: MediaQueryList | MediaQueryListEvent) => {
+      const matches = event ? event.matches : media.matches;
+      if (matches) {
+        setPanelVisible(false);
+        setModeMenuOpen(false);
+      }
+    };
+
+    syncMobileDefaults();
+    media.addEventListener("change", syncMobileDefaults);
+    return () => media.removeEventListener("change", syncMobileDefaults);
+  }, []);
 
   useEffect(() => {
     if (jsonCopyStatus !== "selected") {
@@ -1137,10 +1157,56 @@ export default function App() {
         ? "TSL preview"
         : "WebGL fallback"
       : "WebGL GLSL";
+  const mobileUiOpen = panelVisible || modeMenuOpen;
+
+  const closeMobileSheets = () => {
+    setPanelVisible(false);
+    setModeMenuOpen(false);
+  };
+
+  const openMobileEffects = () => {
+    setModeMenuOpen(true);
+    setPanelVisible(false);
+  };
+
+  const openMobileControls = () => {
+    setPanelVisible(true);
+    setModeMenuOpen(false);
+  };
+
+  const selectLogoStyle = (style: LogoStyle) => {
+    updateSetting("logoStyle", style);
+    setModeMenuOpen(false);
+  };
 
   return (
-    <div className={`app-shell ${panelVisible ? "" : "panel-hidden"}`}>
+    <div
+      className={`app-shell ${panelVisible ? "" : "panel-hidden"} ${
+        mobileUiOpen ? "mobile-ui-open" : ""
+      } ${modeMenuOpen ? "mobile-effects-open" : ""}`}
+    >
+      <button
+        type="button"
+        className="mobile-backdrop"
+        aria-label="Close panel"
+        onClick={closeMobileSheets}
+      />
       <aside className="control-panel" aria-label="Particle logo controls">
+        <div className="mobile-sheet-header">
+          <div className="mobile-sheet-handle" aria-hidden="true" />
+          <div className="mobile-sheet-title">
+            <strong>Controls</strong>
+            <small>{activeStyle.hudLabel}</small>
+          </div>
+          <button
+            type="button"
+            className="mobile-sheet-close"
+            aria-label="Close controls"
+            onClick={() => setPanelVisible(false)}
+          >
+            <X size={18} />
+          </button>
+        </div>
         <header className="app-header">
           <div className="app-mark">
             <Sparkles size={18} strokeWidth={1.7} />
@@ -3108,7 +3174,7 @@ export default function App() {
           webgpuSupported={webgpuSupported}
         />
 
-        <div className="stage-hud stage-hud-top" aria-label="Shader workspace navigation">
+        <div className="stage-hud stage-hud-top stage-hud-desktop" aria-label="Shader workspace navigation">
           <div className="hud-brand">SVG SHADER LAB</div>
           <div className="shader-mode-picker">
             <button
@@ -3138,10 +3204,7 @@ export default function App() {
                     type="button"
                     role="option"
                     aria-selected={settings.logoStyle === style.id}
-                    onClick={() => {
-                      updateSetting("logoStyle", style.id);
-                      setModeMenuOpen(false);
-                    }}
+                    onClick={() => selectLogoStyle(style.id)}
                   >
                     <span className="style-swatch" aria-hidden="true" />
                     <span>
@@ -3162,7 +3225,7 @@ export default function App() {
           </button>
         </div>
 
-        <div className="stage-hud stage-hud-bottom" aria-label="Shader playback controls">
+        <div className="stage-hud stage-hud-bottom stage-hud-desktop" aria-label="Shader playback controls">
           <div className="hud-playback">
             <button type="button" onClick={() => setIsPaused((value) => !value)}>
               {isPaused ? "PLAY" : "PAUSE"}
@@ -3241,7 +3304,100 @@ export default function App() {
             Upload SVG
           </button>
         </div>
+
+        <button
+          type="button"
+          className="mobile-effect-chip"
+          aria-expanded={modeMenuOpen}
+          onClick={() => (modeMenuOpen ? closeMobileSheets() : openMobileEffects())}
+        >
+          <span className={`style-swatch style-${activeStyle.id}`} aria-hidden="true" />
+          <span className="mobile-effect-chip-copy">
+            <strong>{activeStyle.hudLabel}</strong>
+            <small>{activeStyle.detail}</small>
+          </span>
+        </button>
       </main>
+
+      <section
+        className={`mobile-effects-sheet ${modeMenuOpen ? "open" : ""}`}
+        aria-label="Shader effects"
+        aria-hidden={!modeMenuOpen}
+      >
+        <div className="mobile-sheet-header">
+          <div className="mobile-sheet-handle" aria-hidden="true" />
+          <div className="mobile-sheet-title">
+            <strong>Effects</strong>
+            <small>{LOGO_STYLES.length} modes</small>
+          </div>
+          <button
+            type="button"
+            className="mobile-sheet-close"
+            aria-label="Close effects"
+            onClick={() => setModeMenuOpen(false)}
+          >
+            <X size={18} />
+          </button>
+        </div>
+        <div className="shader-mode-menu mobile-mode-grid" role="listbox" aria-label="Shader modes">
+          {LOGO_STYLES.map((style) => (
+            <button
+              key={`mobile-${style.id}`}
+              className={`style-card style-${style.id} ${
+                settings.logoStyle === style.id ? "active" : ""
+              }`}
+              type="button"
+              role="option"
+              aria-selected={settings.logoStyle === style.id}
+              onClick={() => selectLogoStyle(style.id)}
+            >
+              <span className="style-swatch" aria-hidden="true" />
+              <span>
+                <strong>{style.hudLabel}</strong>
+                <small>{style.detail}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <nav className="mobile-dock" aria-label="Mobile controls">
+        <button
+          type="button"
+          className={`mobile-dock-button ${modeMenuOpen ? "active" : ""}`}
+          aria-expanded={modeMenuOpen}
+          onClick={() => (modeMenuOpen ? closeMobileSheets() : openMobileEffects())}
+        >
+          <Layers size={18} />
+          <span>Effects</span>
+        </button>
+        <button
+          type="button"
+          className={`mobile-dock-button ${panelVisible ? "active" : ""}`}
+          aria-expanded={panelVisible}
+          onClick={() => (panelVisible ? closeMobileSheets() : openMobileControls())}
+        >
+          <SlidersHorizontal size={18} />
+          <span>Tune</span>
+        </button>
+        <button
+          type="button"
+          className="mobile-dock-button"
+          aria-label={isPaused ? "Play animation" : "Pause animation"}
+          onClick={() => setIsPaused((value) => !value)}
+        >
+          {isPaused ? <Play size={18} /> : <Pause size={18} />}
+          <span>{isPaused ? "Play" : "Pause"}</span>
+        </button>
+        <button
+          type="button"
+          className="mobile-dock-button"
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <Upload size={18} />
+          <span>SVG</span>
+        </button>
+      </nav>
 
       {sourceMode === "draw" && drawFullscreen && (
         <div className="draw-workspace" role="dialog" aria-label="Expanded SVG drawing canvas">
