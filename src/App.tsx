@@ -29,6 +29,11 @@ import {
   X
 } from "lucide-react";
 import { DEFAULT_SVG } from "./defaultLogo";
+import {
+  getVisibleLogoStyles,
+  LOGO_STYLES,
+  resolveLogoStyleFromSlug
+} from "./effectsCatalog";
 import { ParticleLogoScene } from "./ParticleLogoScene";
 import { getRecommendedParticleCount, sampleSvgToParticles } from "./svgSampler";
 import { sanitizeSvgText } from "./svgSanitize";
@@ -505,49 +510,46 @@ const EFFECT_SETTING_PRESETS: Record<LogoStyle, EffectSettings> = {
   }
 };
 
-const LOGO_STYLES: Array<{
-  id: LogoStyle;
-  label: string;
-  hudLabel: string;
-  detail: string;
-}> = [
-  { id: "dust", label: "Particles", hudLabel: "PARTICLES", detail: "white particle flow" },
-  { id: "ripples", label: "Ripples", hudLabel: "RIPPLES", detail: "ring wave pulses" },
-  { id: "lines", label: "Lines", hudLabel: "LINES", detail: "thin scan strokes" },
-  { id: "ascii", label: "ASCII", hudLabel: "ASCII", detail: "glyph particle field" },
-  { id: "ascii2", label: "ASCII 2", hudLabel: "ASCII 2", detail: "raster text filter" },
-  { id: "fancy", label: "Fancy", hudLabel: "FANCY", detail: "layered SVG strokes" },
-  { id: "walkers", label: "Walkers", hudLabel: "WALKERS", detail: "webcam crowd flow" },
-  { id: "metal", label: "Metal", hudLabel: "METAL", detail: "extruded silver 3D" },
-  { id: "mercury", label: "Mercury", hudLabel: "MERCURY", detail: "liquid chrome relief" },
-  { id: "chrome", label: "Chrome", hudLabel: "CHROME", detail: "prismatic flow metal" },
-  { id: "radiance", label: "Radiance", hudLabel: "RADIANCE", detail: "red beam glow" },
-  { id: "dither", label: "Dither", hudLabel: "DITHER", detail: "ordered halftone" },
-  { id: "bulge", label: "Bulge", hudLabel: "BULGE", detail: "refractive 3D lens" },
-  { id: "gommage", label: "Gommage", hudLabel: "GOMMAGE", detail: "powder dissolve" },
-  { id: "elastic", label: "Elastic", hudLabel: "ELASTIC", detail: "vertex destruction" },
-  { id: "hyperspace", label: "Hyperspace", hudLabel: "HYPERSPACE", detail: "warp tunnel particles" },
-  { id: "access", label: "Access", hudLabel: "ACCESS", detail: "text reveal RGB shift" },
-  { id: "glitch", label: "Glitch", hudLabel: "GLITCH", detail: "RGB slice reveal" },
-  { id: "trail", label: "Trail", hudLabel: "TRAIL", detail: "framebuffer text trail" },
-  { id: "fluid", label: "Fluid", hudLabel: "FLUID", detail: "mouse fluid reveal" },
-  { id: "fluidglass", label: "Fluid Glass", hudLabel: "GLASS", detail: "reaction glass flow" },
-  { id: "shadow", label: "Shadow", hudLabel: "SHADOW", detail: "lifted SVG shadow" },
-  { id: "clouds", label: "Clouds", hudLabel: "CLOUDS", detail: "smoke typing puffs" },
-  { id: "bubbles", label: "Bubbles", hudLabel: "BUBBLES", detail: "rising bubble type" },
-  { id: "blossom", label: "Blossom", hudLabel: "BLOSSOM", detail: "flower leaf type" },
-  { id: "gaze", label: "Gaze", hudLabel: "GAZE", detail: "pupil follow type" },
-  { id: "vfx", label: "VFX", hudLabel: "VFX", detail: "thru light shadow" }
-];
-
-const LOGO_STYLE_IDS = new Set<string>(LOGO_STYLES.map((style) => style.id));
-
 function readLogoStyleFromUrl(): LogoStyle {
   if (typeof window === "undefined") {
     return "dust";
   }
   const slug = window.location.pathname.replace(/^\/+|\/+$/g, "").toLowerCase();
-  return LOGO_STYLE_IDS.has(slug) ? (slug as LogoStyle) : "dust";
+  return resolveLogoStyleFromSlug(slug);
+}
+
+function StyleModeOption({
+  style,
+  active,
+  compact = false,
+  onSelect
+}: {
+  style: ReturnType<typeof getVisibleLogoStyles>[number];
+  active: boolean;
+  compact?: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      className={`style-card style-${style.id} ${active ? "active" : ""} ${
+        style.devOnly ? "style-card-dev" : ""
+      } ${compact ? "style-card-compact" : ""}`}
+      type="button"
+      role="option"
+      aria-selected={active}
+      title={compact ? style.detail : undefined}
+      onClick={onSelect}
+    >
+      <span className="style-swatch" aria-hidden="true" />
+      <span className="style-card-copy">
+        <strong>
+          {style.hudLabel}
+          {style.devOnly && <em className="style-dev-tag">DEV</em>}
+        </strong>
+        {!compact && <small>{style.detail}</small>}
+      </span>
+    </button>
+  );
 }
 
 const FANCY_VARIANTS: Array<{
@@ -708,7 +710,9 @@ export default function App() {
   );
   const colorLabels = getColorControlLabels(settings.logoStyle);
   const typingLabels = getTypingControlLabels(settings.logoStyle);
+  const visibleLogoStyles = useMemo(() => getVisibleLogoStyles(), []);
   const activeStyle = LOGO_STYLES.find((style) => style.id === settings.logoStyle) ?? LOGO_STYLES[0];
+  const activeStyleIsDev = visibleLogoStyles.find((style) => style.id === settings.logoStyle)?.devOnly ?? false;
 
   useEffect(() => {
     setWebglSupported(detectWebGlSupport());
@@ -3186,7 +3190,10 @@ export default function App() {
             >
               <span className="style-swatch" aria-hidden="true" />
               <span className="shader-mode-current">
-                <strong>{activeStyle.hudLabel}</strong>
+                <strong>
+                  {activeStyle.hudLabel}
+                  {activeStyleIsDev && <em className="style-dev-tag">DEV</em>}
+                </strong>
                 <small>{activeStyle.detail}</small>
               </span>
               <span className="shader-mode-caret" aria-hidden="true">
@@ -3195,23 +3202,18 @@ export default function App() {
             </button>
             {modeMenuOpen && (
               <div className="shader-mode-menu" role="listbox" aria-label="Shader modes">
-                {LOGO_STYLES.map((style) => (
-                  <button
-                    key={style.id}
-                    className={`style-card style-${style.id} ${
-                      settings.logoStyle === style.id ? "active" : ""
-                    }`}
-                    type="button"
-                    role="option"
-                    aria-selected={settings.logoStyle === style.id}
-                    onClick={() => selectLogoStyle(style.id)}
-                  >
-                    <span className="style-swatch" aria-hidden="true" />
-                    <span>
-                      <strong>{style.hudLabel}</strong>
-                      <small>{style.detail}</small>
-                    </span>
-                  </button>
+                {visibleLogoStyles.map((style, index) => (
+                  <div key={style.id} className="shader-mode-option-wrap">
+                    {style.devOnly &&
+                      (index === 0 || !visibleLogoStyles[index - 1]?.devOnly) && (
+                        <div className="shader-mode-dev-heading">Dev builds</div>
+                      )}
+                    <StyleModeOption
+                      style={style}
+                      active={settings.logoStyle === style.id}
+                      onSelect={() => selectLogoStyle(style.id)}
+                    />
+                  </div>
                 ))}
               </div>
             )}
@@ -3313,7 +3315,10 @@ export default function App() {
         >
           <span className={`style-swatch style-${activeStyle.id}`} aria-hidden="true" />
           <span className="mobile-effect-chip-copy">
-            <strong>{activeStyle.hudLabel}</strong>
+            <strong>
+              {activeStyle.hudLabel}
+              {activeStyleIsDev && <em className="style-dev-tag">DEV</em>}
+            </strong>
             <small>{activeStyle.detail}</small>
           </span>
         </button>
@@ -3328,7 +3333,10 @@ export default function App() {
           <div className="mobile-sheet-handle" aria-hidden="true" />
           <div className="mobile-sheet-title">
             <strong>Effects</strong>
-            <small>{LOGO_STYLES.length} modes</small>
+            <small>
+              {visibleLogoStyles.length} modes
+              {import.meta.env.DEV ? " · dev catalog" : ""}
+            </small>
           </div>
           <button
             type="button"
@@ -3340,23 +3348,18 @@ export default function App() {
           </button>
         </div>
         <div className="shader-mode-menu mobile-mode-grid" role="listbox" aria-label="Shader modes">
-          {LOGO_STYLES.map((style) => (
-            <button
-              key={`mobile-${style.id}`}
-              className={`style-card style-${style.id} ${
-                settings.logoStyle === style.id ? "active" : ""
-              }`}
-              type="button"
-              role="option"
-              aria-selected={settings.logoStyle === style.id}
-              onClick={() => selectLogoStyle(style.id)}
-            >
-              <span className="style-swatch" aria-hidden="true" />
-              <span>
-                <strong>{style.hudLabel}</strong>
-                <small>{style.detail}</small>
-              </span>
-            </button>
+          {visibleLogoStyles.map((style, index) => (
+            <div key={`mobile-${style.id}`} className="shader-mode-option-wrap">
+              {style.devOnly && (index === 0 || !visibleLogoStyles[index - 1]?.devOnly) && (
+                <div className="shader-mode-dev-heading">Dev builds</div>
+              )}
+              <StyleModeOption
+                style={style}
+                active={settings.logoStyle === style.id}
+                compact
+                onSelect={() => selectLogoStyle(style.id)}
+              />
+            </div>
           ))}
         </div>
       </section>
