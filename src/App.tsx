@@ -42,7 +42,8 @@ import type {
   LogoSource,
   LogoStyle,
   ParticleSettings,
-  RenderMode
+  RenderMode,
+  SdfMotionMode
 } from "./types";
 
 type EffectSettings = Omit<ParticleSettings, "logoStyle">;
@@ -67,6 +68,7 @@ const BASE_EFFECT_SETTINGS: EffectSettings = {
   animationSpeed: 0.45,
   walkerReturnSpeed: 0.4,
   walkerWander: 0.5,
+  sdfMotionMode: "drift",
   gridVisible: true,
   renderMode: "webgl"
 };
@@ -404,6 +406,22 @@ const EFFECT_SETTING_PRESETS: Record<LogoStyle, EffectSettings> = {
     flicker: 0.18,
     breathe: 0.12,
     animationSpeed: 0.72
+  },
+  sdf: {
+    ...BASE_EFFECT_SETTINGS,
+    particleColor: "#ffffff",
+    particleAccentColor: "#eef6ff",
+    particleHighlightColor: "#ffffff",
+    particleCount: 30000,
+    pointSize: 2.6,
+    turbulence: 0.78,
+    scatterRadius: 0.82,
+    mouseForce: 0.72,
+    attractRadius: 0.92,
+    repelRadius: 0.3,
+    flicker: 0.03,
+    breathe: 0.1,
+    animationSpeed: 0.58
   },
   gaze: {
     ...BASE_EFFECT_SETTINGS,
@@ -2959,6 +2977,109 @@ export default function App() {
                 onChange={(value) => updateSetting("animationSpeed", value)}
               />
             </>
+          ) : settings.logoStyle === "sdf" ? (
+            <>
+              <label className="variant-select-row">
+                <span>
+                  <strong>Motion</strong>
+                  <small>
+                    {settings.sdfMotionMode === "aquarium"
+                      ? "Bubbles rise and shrink like soda carbonation"
+                      : "Free drift with collisions inside the logo"}
+                  </small>
+                </span>
+                <select
+                  value={settings.sdfMotionMode}
+                  onChange={(event) =>
+                    updateSetting("sdfMotionMode", event.target.value as SdfMotionMode)
+                  }
+                >
+                  <option value="drift">Drift</option>
+                  <option value="aquarium">Aquarium rise</option>
+                </select>
+              </label>
+              <SliderControl
+                label="Density"
+                value={settings.particleCount}
+                min={6000}
+                max={48000}
+                step={1000}
+                format={(value) => `${Math.round(value / 1000)}k`}
+                onChange={(value) => updateSetting("particleCount", value)}
+              />
+              <SliderControl
+                label="Bubble size"
+                value={settings.pointSize}
+                min={1.2}
+                max={6}
+                step={0.1}
+                onChange={(value) => updateSetting("pointSize", value)}
+              />
+              <SliderControl
+                label="Flow noise"
+                value={settings.turbulence}
+                min={0}
+                max={2}
+                step={0.05}
+                onChange={(value) => updateSetting("turbulence", value)}
+              />
+              <SliderControl
+                label="Spawn spread"
+                value={settings.scatterRadius}
+                min={0.1}
+                max={2}
+                step={0.05}
+                onChange={(value) => updateSetting("scatterRadius", value)}
+              />
+              <SliderControl
+                label="Mouse push"
+                value={settings.mouseForce}
+                min={0}
+                max={2}
+                step={0.05}
+                onChange={(value) => updateSetting("mouseForce", value)}
+              />
+              <SliderControl
+                label="Cluster pull"
+                value={settings.attractRadius}
+                min={0}
+                max={2}
+                step={0.05}
+                onChange={(value) => updateSetting("attractRadius", value)}
+              />
+              <SliderControl
+                label="Mouse reach"
+                value={settings.repelRadius}
+                min={0.08}
+                max={0.8}
+                step={0.02}
+                onChange={(value) => updateSetting("repelRadius", value)}
+              />
+              <SliderControl
+                label="Grain"
+                value={settings.flicker}
+                min={0}
+                max={0.2}
+                step={0.01}
+                onChange={(value) => updateSetting("flicker", value)}
+              />
+              <SliderControl
+                label="Body pulse"
+                value={settings.breathe}
+                min={0}
+                max={0.2}
+                step={0.01}
+                onChange={(value) => updateSetting("breathe", value)}
+              />
+              <SliderControl
+                label="Speed"
+                value={settings.animationSpeed}
+                min={0.15}
+                max={1.6}
+                step={0.05}
+                onChange={(value) => updateSetting("animationSpeed", value)}
+              />
+            </>
           ) : settings.logoStyle === "walkers" ? (
             <>
               <SliderControl
@@ -3292,6 +3413,8 @@ export default function App() {
                 ? "VFX THRU SHADOW"
                 : settings.logoStyle === "walkers"
                 ? "WEBCAM CROWD FLOW"
+                : settings.logoStyle === "sdf"
+                ? "SDF METABALL BUBBLES"
                 : isSurfaceLogoStyle(settings.logoStyle)
                 ? "SVG MASK SHADER"
                 : `${settings.particleCount.toLocaleString()} PARTICLES`}
@@ -3982,6 +4105,15 @@ function getColorControlLabels(style: LogoStyle) {
       primary: "Glass",
       accent: "Water",
       highlight: "Spark"
+    };
+  }
+
+  if (style === "sdf") {
+    return {
+      ariaLabel: "SDF metaball colors",
+      primary: "Blob",
+      accent: "Foam",
+      highlight: "Shine"
     };
   }
 

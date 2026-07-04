@@ -56,7 +56,8 @@ export const LOGO_STYLES: LogoStyleMeta[] = [
   { id: "shadow", label: "Shadow", hudLabel: "SHADOW", detail: "lifted SVG shadow" },
   { id: "clouds", label: "Clouds", hudLabel: "CLOUDS", detail: "smoke typing puffs" },
   { id: "bubbles", label: "Bubbles", hudLabel: "BUBBLES", detail: "rising bubble type" },
-  { id: "gaze", label: "Gaze", hudLabel: "GAZE", detail: "pupil follow type" }
+  { id: "gaze", label: "Gaze", hudLabel: "GAZE", detail: "pupil follow type" },
+  { id: "sdf", label: "SDF", hudLabel: "SDF", detail: "metaball bubble rise" }
 ];
 
 const LOGO_STYLE_BY_ID = new Map(LOGO_STYLES.map((style) => [style.id, style]));

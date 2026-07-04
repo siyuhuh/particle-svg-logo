@@ -6,6 +6,7 @@ export type LogoSource = {
 
 export type RenderMode = "webgl" | "webgpu-tsl";
 export type FancyVariant = "effect1" | "effect2" | "effect3" | "effect4";
+export type SdfMotionMode = "drift" | "aquarium";
 export type LogoStyle =
   | "dust"
   | "ripples"
@@ -33,7 +34,8 @@ export type LogoStyle =
   | "ascii"
   | "ascii2"
   | "fancy"
-  | "walkers";
+  | "walkers"
+  | "sdf";
 
 export type ParticleSettings = {
   logoStyle: LogoStyle;
@@ -58,6 +60,8 @@ export type ParticleSettings = {
   walkerReturnSpeed: number;
   /** Walkers: how much they curve/meander on the way home instead of beelining. */
   walkerWander: number;
+  /** SDF: drift = omnidirectional metaballs; aquarium = rising aerator bubbles. */
+  sdfMotionMode: SdfMotionMode;
   gridVisible: boolean;
   renderMode: RenderMode;
 };
