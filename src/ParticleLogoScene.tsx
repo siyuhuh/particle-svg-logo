@@ -3061,6 +3061,11 @@ function getSdfActiveBubbleCount(particleCount: number) {
   ));
 }
 
+function getSdfBubbleSizeScale(pointSize: number, bubbleCount: number) {
+  // Keep the low end small enough to reveal narrow strokes and interior gaps.
+  return (0.22 + pointSize * 0.1) * Math.sqrt(274 / bubbleCount);
+}
+
 const sdfBubbleVertexShader = `
   varying vec2 vUv;
 
@@ -3453,8 +3458,10 @@ function resetAquariumBubble(
   warmStart = false
 ) {
   const origin = emitters[Math.floor(Math.random() * emitters.length)] ?? new THREE.Vector2();
-  const countScale = Math.sqrt(274 / getSdfActiveBubbleCount(settings.particleCount));
-  const sizeScale = (0.46 + settings.pointSize * 0.062) * countScale;
+  const sizeScale = getSdfBubbleSizeScale(
+    settings.pointSize,
+    getSdfActiveBubbleCount(settings.particleCount)
+  );
   bubble.role = "riser";
   bubble.seed = Math.random();
   bubble.baseRadius = createAquariumBaseRadius(sizeScale, "riser");
@@ -4000,7 +4007,7 @@ function createSdfBubble(
   mask: SdfMaskSampler | null
 ): SdfBubble {
   const aquarium = settings.sdfMotionMode === "aquarium";
-  const sizeScale = (0.46 + settings.pointSize * 0.062) * Math.sqrt(274 / activeBubbleCount);
+  const sizeScale = getSdfBubbleSizeScale(settings.pointSize, activeBubbleCount);
   const bodyCount = aquarium ? getSdfAquariumBodyCount(activeBubbleCount) : 0;
   const isBody = aquarium && index < bodyCount;
   const role: SdfBubbleRole = isBody ? "body" : "riser";

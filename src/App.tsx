@@ -416,7 +416,7 @@ const EFFECT_SETTING_PRESETS: Record<LogoStyle, EffectSettings> = {
     particleAccentColor: "#eef6ff",
     particleHighlightColor: "#ffffff",
     particleCount: 30000,
-    pointSize: 2.6,
+    pointSize: 2,
     turbulence: 0.78,
     scatterRadius: 0.82,
     mouseForce: 0.72,
@@ -3013,7 +3013,7 @@ export default function App() {
               <SliderControl
                 label="Bubble size"
                 value={settings.pointSize}
-                min={1.2}
+                min={0.3}
                 max={6}
                 step={0.1}
                 onChange={(value) => updateSetting("pointSize", value)}

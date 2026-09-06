@@ -18,6 +18,7 @@ export const PRODUCTION_LOGO_STYLE_IDS = [
   "ascii",
   "ascii2",
   "walkers",
+  "sdf",
   "metal",
   "gommage",
   "hyperspace",
@@ -35,6 +36,7 @@ export const LOGO_STYLES: LogoStyleMeta[] = [
   { id: "ascii", label: "ASCII", hudLabel: "ASCII", detail: "glyph particle field" },
   { id: "ascii2", label: "ASCII 2", hudLabel: "ASCII 2", detail: "raster text filter" },
   { id: "walkers", label: "Walkers", hudLabel: "WALKERS", detail: "webcam crowd flow" },
+  { id: "sdf", label: "SDF", hudLabel: "SDF", detail: "soft rising puffs" },
   { id: "metal", label: "Metal", hudLabel: "METAL", detail: "extruded silver 3D" },
   { id: "gommage", label: "Gommage", hudLabel: "GOMMAGE", detail: "powder dissolve" },
   { id: "hyperspace", label: "Hyperspace", hudLabel: "HYPERSPACE", detail: "warp tunnel particles" },
@@ -56,8 +58,7 @@ export const LOGO_STYLES: LogoStyleMeta[] = [
   { id: "shadow", label: "Shadow", hudLabel: "SHADOW", detail: "lifted SVG shadow" },
   { id: "clouds", label: "Clouds", hudLabel: "CLOUDS", detail: "smoke typing puffs" },
   { id: "bubbles", label: "Bubbles", hudLabel: "BUBBLES", detail: "rising bubble type" },
-  { id: "gaze", label: "Gaze", hudLabel: "GAZE", detail: "pupil follow type" },
-  { id: "sdf", label: "SDF", hudLabel: "SDF", detail: "metaball bubble rise" }
+  { id: "gaze", label: "Gaze", hudLabel: "GAZE", detail: "pupil follow type" }
 ];
 
 const LOGO_STYLE_BY_ID = new Map(LOGO_STYLES.map((style) => [style.id, style]));
