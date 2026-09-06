@@ -13,6 +13,7 @@ import {
   Expand,
   FileCode2,
   Grid3X3,
+  Hand,
   Layers,
   Minimize2,
   Minus,
@@ -69,6 +70,7 @@ const BASE_EFFECT_SETTINGS: EffectSettings = {
   walkerReturnSpeed: 0.4,
   walkerWander: 0.5,
   sdfMotionMode: "drift",
+  handControl: false,
   gridVisible: true,
   renderMode: "webgl"
 };
@@ -3244,6 +3246,18 @@ export default function App() {
               <Grid3X3 size={16} />
               Grid
             </label>
+
+            {settings.logoStyle !== "walkers" && (
+              <label className="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={settings.handControl}
+                  onChange={(event) => updateSetting("handControl", event.target.checked)}
+                />
+                <Hand size={16} />
+                Hand
+              </label>
+            )}
 
             <label className="select-row">
               <Cpu size={16} />

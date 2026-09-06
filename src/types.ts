@@ -62,6 +62,8 @@ export type ParticleSettings = {
   walkerWander: number;
   /** SDF: drift = omnidirectional metaballs; aquarium = rising aerator bubbles. */
   sdfMotionMode: SdfMotionMode;
+  /** Non-walkers styles: drive the pointer with a webcam-tracked hand. */
+  handControl: boolean;
   gridVisible: boolean;
   renderMode: RenderMode;
 };

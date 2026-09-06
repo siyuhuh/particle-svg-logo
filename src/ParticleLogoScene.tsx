@@ -14,6 +14,7 @@ import {
 } from "./sceneSizing";
 import { sampleSvgToParticles } from "./svgSampler";
 import { WebcamWalkersOverlay } from "./WebcamWalkersOverlay";
+import { HandPointerControl } from "./HandPointerControl";
 import type { LogoStyle, ParticleBuffers, ParticleSettings } from "./types";
 
 type ParticleLogoSceneProps = {
@@ -2041,6 +2042,7 @@ export function ParticleLogoScene({
           paused={paused}
         />
       )}
+      {!walkersStyle && settings.handControl && <HandPointerControl />}
       <div className="scene-scanlines" aria-hidden="true" />
       {settings.renderMode === "webgpu-tsl" && (
         <div className="render-mode-note">

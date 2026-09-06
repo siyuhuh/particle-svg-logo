@@ -1550,7 +1550,8 @@ h1 {
   display: block;
 }
 
-.webcam-walkers-status {
+.webcam-walkers-status,
+.hand-pointer-status {
   position: absolute;
   left: 50%;
   bottom: 16px;
@@ -1572,16 +1573,77 @@ h1 {
   text-overflow: ellipsis;
 }
 
-.webcam-walkers-status.status-active {
+.webcam-walkers-status.status-active,
+.hand-pointer-status.status-active {
   border-color: rgba(123, 224, 168, 0.5);
   color: rgba(186, 255, 214, 0.95);
 }
 
 .webcam-walkers-status.status-denied,
 .webcam-walkers-status.status-error,
-.webcam-walkers-status.status-unsupported {
+.webcam-walkers-status.status-unsupported,
+.hand-pointer-status.status-denied,
+.hand-pointer-status.status-error,
+.hand-pointer-status.status-unsupported {
   border-color: rgba(255, 138, 138, 0.5);
   color: rgba(255, 200, 200, 0.95);
+}
+
+.hand-pointer-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.hand-pointer-overlay * {
+  pointer-events: none;
+}
+
+.hand-pointer-cursor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 2px solid rgba(123, 224, 168, 0.9);
+  background: rgba(123, 224, 168, 0.14);
+  box-shadow: 0 0 14px rgba(123, 224, 168, 0.35);
+  opacity: 0;
+  transition: opacity 160ms ease;
+  will-change: transform;
+}
+
+.hand-pointer-cursor.is-pressed {
+  border-color: rgba(255, 200, 120, 0.95);
+  background: rgba(255, 200, 120, 0.2);
+  box-shadow: 0 0 18px rgba(255, 200, 120, 0.45);
+}
+
+.hand-pointer-preview {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  width: 128px;
+  aspect-ratio: 4 / 3;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(8, 12, 20, 0.62);
+  backdrop-filter: blur(6px);
+}
+
+.hand-pointer-preview:empty {
+  display: none;
+}
+
+.hand-pointer-preview video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1);
 }
 
 .ascii-raster-overlay {

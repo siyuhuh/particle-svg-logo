@@ -1,19 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
+import { useEffect, useMemo, useRef } from "react";
 import { sampleSvgToParticles } from "./svgSampler";
 import { LOGO_CONTENT_WORLD_SIZE } from "./sceneSizing";
+import { useHandTracking, type TrackedHand } from "./useHandTracking";
 import type { ParticleSettings } from "./types";
-
-// A tracked hand: smoothed screen-space position + velocity (px / 60fps-frame).
-// active fades to 0 the moment the hand leaves frame, so the crowd then walks home.
-type Hand = {
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  active: number;
-  seen: number;
-};
 
 type WebcamWalkersOverlayProps = {
   svgText: string;
@@ -45,19 +34,11 @@ type Walker = {
   gender: number;
   /** 0 = calm (Core color) → 1 = agitated (Hot color); smoothed for color blending. */
   heat: number;
+  /** >0 while tumbling after being dropped from a pinch (counts down to 0). */
+  fall: number;
+  /** True this frame while dangling from a pinch — drawn last, with a sway. */
+  held: boolean;
 };
-
-type CameraStatus =
-  | "idle"
-  | "requesting"
-  | "active"
-  | "denied"
-  | "unsupported"
-  | "error";
-
-// MediaPipe HandLandmarker assets, bundled in public/ so it works on LAN / offline.
-const MP_WASM_PATH = "/mediapipe/wasm";
-const MP_HAND_MODEL = "/mediapipe/hand_landmarker.task";
 
 // Walk-cycle sprite sheet. Rows = PALETTE_STEPS heat steps × GENDERS (male, female).
 const WALK_FRAMES = 12;
@@ -223,8 +204,12 @@ export function WebcamWalkersOverlay({
 }: WebcamWalkersOverlayProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [status, setStatus] = useState<CameraStatus>("idle");
-  const [modelReady, setModelReady] = useState(false);
+
+  // Shared webcam + MediaPipe layer: tracked hands (≤2) with velocity + gesture.
+  const { handsRef, status, modelReady, videoRef } = useHandTracking({
+    enabled: true,
+    viewRef: containerRef
+  });
 
   const walkerSheet = useMemo(
     () =>
@@ -275,12 +260,6 @@ export function WebcamWalkersOverlay({
   const gridRef = useRef(homes.grid);
   const walkersRef = useRef<Walker[]>([]);
 
-  // MediaPipe hand tracker — only the HAND pushes the crowd (a face/any motion is
-  // ignored, unlike optical flow), so it can clear, pile, and reliably return.
-  const handLandmarkerRef = useRef<HandLandmarker | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const cameraActive = useRef(false);
-
   // Rebuild walkers whenever the logo shape / count changes.
   useEffect(() => {
     homesRef.current = homes;
@@ -316,7 +295,9 @@ export function WebcamWalkersOverlay({
         placed: old ? old.placed : false,
         disp: old ? old.disp : 0,
         gender: old ? old.gender : Math.random() < 0.5 ? 0 : 1,
-        heat: old ? old.heat : 0
+        heat: old ? old.heat : 0,
+        fall: old ? old.fall : 0,
+        held: false
       };
     });
     walkersRef.current = next;
@@ -337,97 +318,6 @@ export function WebcamWalkersOverlay({
     });
   }, [replayNonce]);
 
-  // Camera lifecycle — runs once while this style is mounted.
-  useEffect(() => {
-    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
-      setStatus("unsupported");
-      return;
-    }
-
-    let cancelled = false;
-    let stream: MediaStream | null = null;
-    const video = document.createElement("video");
-    video.muted = true;
-    video.playsInline = true;
-    video.setAttribute("playsinline", "");
-    videoRef.current = video;
-
-    setStatus("requesting");
-    navigator.mediaDevices
-      .getUserMedia({
-        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" },
-        audio: false
-      })
-      .then(async (mediaStream) => {
-        if (cancelled) {
-          mediaStream.getTracks().forEach((track) => track.stop());
-          return;
-        }
-        stream = mediaStream;
-        video.srcObject = mediaStream;
-        await video.play();
-        cameraActive.current = true;
-        setStatus("active");
-      })
-      .catch((err: DOMException) => {
-        if (cancelled) {
-          return;
-        }
-        cameraActive.current = false;
-        setStatus(
-          err?.name === "NotAllowedError" || err?.name === "SecurityError"
-            ? "denied"
-            : "error"
-        );
-      });
-
-    return () => {
-      cancelled = true;
-      cameraActive.current = false;
-      stream?.getTracks().forEach((track) => track.stop());
-      video.srcObject = null;
-      videoRef.current = null;
-    };
-  }, []);
-
-  // Load the MediaPipe hand model once (GPU, falling back to CPU). Assets are local.
-  useEffect(() => {
-    let cancelled = false;
-    let landmarker: HandLandmarker | null = null;
-    (async () => {
-      try {
-        const vision = await FilesetResolver.forVisionTasks(MP_WASM_PATH);
-        const make = (delegate: "GPU" | "CPU") =>
-          HandLandmarker.createFromOptions(vision, {
-            baseOptions: { modelAssetPath: MP_HAND_MODEL, delegate },
-            runningMode: "VIDEO",
-            numHands: 2
-          });
-        try {
-          landmarker = await make("GPU");
-        } catch {
-          landmarker = await make("CPU");
-        }
-        if (cancelled) {
-          landmarker.close();
-          return;
-        }
-        handLandmarkerRef.current = landmarker;
-        setModelReady(true);
-      } catch {
-        if (!cancelled) {
-          setModelReady(false);
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-      handLandmarkerRef.current = null;
-      landmarker?.close();
-    };
-  }, []);
-
   // Animation loop — runs once; reads latest settings via refs.
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -439,18 +329,19 @@ export function WebcamWalkersOverlay({
 
     let raf = 0;
     let last = performance.now();
-    let lastDetectTs = 0;
     let dpr = Math.min(window.devicePixelRatio || 1, 2);
     let cssW = 0;
     let cssH = 0;
     // Grace (60fps-frame units) so a 1-frame detection dropout doesn't make the crowd
     // bolt home; stays >0 while a hand is in frame, decays once the hand leaves.
     let handHold = 0;
-    // Persistent tracked hands (≤2), kept across frames so we can derive velocity.
-    const hands: Hand[] = [];
     // Painter's-order index buffer (sorted back→front by y each frame) so people lower
     // on screen (nearer) correctly occlude those behind. Reused to avoid GC churn.
     let drawOrder: number[] = [];
+    // Per-frame gesture bookkeeping, hoisted to avoid GC churn.
+    const grabbedBy = new Map<number, TrackedHand>();
+    const followTargets = new Map<number, { x: number; y: number }>();
+    const followingSet = new Set<number>();
 
     const resize = () => {
       const bounds = container.getBoundingClientRect();
@@ -470,97 +361,6 @@ export function WebcamWalkersOverlay({
     resizeObserver?.observe(container);
 
     const mirror = true;
-
-    // Map a normalized landmark (raw video space) to on-screen px, matching drawCover's
-    // cover-scaling + mirror so the push lines up exactly with the hand you see.
-    const landmarkToScreen = (lx: number, ly: number, out: { x: number; y: number }) => {
-      const v = videoRef.current;
-      const sw = v?.videoWidth || 640;
-      const sh = v?.videoHeight || 480;
-      const scale = Math.max(cssW / sw, cssH / sh);
-      const dw = sw * scale;
-      const dh = sh * scale;
-      const nx = mirror ? 1 - lx : lx;
-      out.x = (cssW - dw) / 2 + nx * dw;
-      out.y = (cssH - dh) / 2 + ly * dh;
-    };
-
-    // Fold this frame's detected hands into the persistent list (nearest-match so each
-    // hand keeps its velocity); hands not seen this frame fade out → crowd walks home.
-    const syncHands = (detected: Array<{ x: number; y: number }>, dt: number) => {
-      for (let i = 0; i < hands.length; i += 1) {
-        hands[i].seen = 0;
-      }
-      const maxJump = Math.min(cssW, cssH) * 0.5;
-      for (const d of detected) {
-        let best = -1;
-        let bestD = Infinity;
-        for (let i = 0; i < hands.length; i += 1) {
-          if (hands[i].seen) continue;
-          const dd = (hands[i].x - d.x) ** 2 + (hands[i].y - d.y) ** 2;
-          if (dd < bestD) {
-            bestD = dd;
-            best = i;
-          }
-        }
-        if (best >= 0 && bestD < maxJump * maxJump) {
-          const h = hands[best];
-          h.vx = h.vx * 0.5 + ((d.x - h.x) / dt) * 0.5;
-          h.vy = h.vy * 0.5 + ((d.y - h.y) / dt) * 0.5;
-          h.x = d.x;
-          h.y = d.y;
-          h.active = 1;
-          h.seen = 1;
-        } else {
-          hands.push({ x: d.x, y: d.y, vx: 0, vy: 0, active: 1, seen: 1 });
-        }
-      }
-      for (let i = hands.length - 1; i >= 0; i -= 1) {
-        if (!hands[i].seen) {
-          hands[i].active = Math.max(0, hands[i].active - dt * 0.5);
-          hands[i].vx *= 0.85;
-          hands[i].vy *= 0.85;
-          if (hands[i].active <= 0.001) {
-            hands.splice(i, 1);
-          }
-        }
-      }
-    };
-
-    const detected: Array<{ x: number; y: number }> = [];
-    const tmpPt = { x: 0, y: 0 };
-    // Palm landmarks (wrist + finger bases) — their mean is a stable hand centre.
-    const PALM = [0, 1, 5, 9, 13, 17];
-
-    const detectHands = (now: number, dt: number) => {
-      const lm = handLandmarkerRef.current;
-      const video = videoRef.current;
-      detected.length = 0;
-      if (lm && cameraActive.current && video && video.readyState >= 2) {
-        // detectForVideo needs a strictly increasing timestamp (ms).
-        const ts = now <= lastDetectTs ? lastDetectTs + 1 : now;
-        lastDetectTs = ts;
-        let result: ReturnType<HandLandmarker["detectForVideo"]> | null = null;
-        try {
-          result = lm.detectForVideo(video, ts);
-        } catch {
-          result = null;
-        }
-        if (result) {
-          for (const hand of result.landmarks) {
-            let mx = 0;
-            let my = 0;
-            for (const p of PALM) {
-              mx += hand[p].x;
-              my += hand[p].y;
-            }
-            landmarkToScreen(mx / PALM.length, my / PALM.length, tmpPt);
-            detected.push({ x: tmpPt.x, y: tmpPt.y });
-          }
-        }
-      }
-      syncHands(detected, dt);
-    };
 
     const drawCover = (source: HTMLVideoElement) => {
       const sw = source.videoWidth;
@@ -588,10 +388,9 @@ export function WebcamWalkersOverlay({
       last = now;
       const dt = clamp(deltaMs / 16.667, 0.2, 2.2);
 
-      detectHands(now, dt);
-
       const cfg = settingsRef.current;
       const walkers = walkersRef.current;
+      const hands = handsRef.current;
       const video = videoRef.current;
 
       // --- Tuning from panel sliders (velocities are px / 60fps-frame) ---
@@ -662,6 +461,110 @@ export function WebcamWalkersOverlay({
       const ox = cssW / 2 - fit / 2;
       const oy = cssH / 2 - fit / 2;
 
+      // --- Gesture bookkeeping (per hand): pinch grabs, point trails + recruits ---
+      grabbedBy.clear();
+      followTargets.clear();
+      followingSet.clear();
+      if (!pausedRef.current) {
+        for (let hi = 0; hi < hands.length; hi += 1) {
+          const h = hands[hi];
+          if (h.grabbedIndex >= walkers.length) {
+            h.grabbedIndex = -1; // logo/shape changed under us
+          }
+          const pinching = h.gesture === "pinch" && h.active > 0.5;
+          if (pinching) {
+            if (h.grabbedIndex < 0) {
+              // Grab the walker nearest the pinch point (one per hand).
+              const grabR = handRadius * 0.55;
+              let best = -1;
+              let bestD = grabR * grabR;
+              for (let i = 0; i < walkers.length; i += 1) {
+                if (grabbedBy.has(i)) continue;
+                const dx = walkers[i].x - h.pinchX;
+                const dy = walkers[i].y - h.pinchY;
+                const dd = dx * dx + dy * dy;
+                if (dd < bestD) {
+                  bestD = dd;
+                  best = i;
+                }
+              }
+              h.grabbedIndex = best;
+            }
+          } else if (h.grabbedIndex >= 0) {
+            // Released: the walker keeps the hand's motion as a throw + a downward
+            // toss, tumbles briefly, then lies in a heap until hands leave frame.
+            const wk = walkers[h.grabbedIndex];
+            wk.vx = h.vx * 0.6;
+            wk.vy = Math.max(1.6, h.vy * 0.6 + 1.8);
+            wk.fall = 1;
+            wk.disp = 1;
+            h.grabbedIndex = -1;
+          }
+          if (h.grabbedIndex >= 0) {
+            grabbedBy.set(h.grabbedIndex, h);
+          }
+
+          if (h.gesture === "point" && h.active > 0.5) {
+            // Breadcrumb trail: only append once the fingertip has moved a step.
+            const trail = h.trail;
+            const lastPt = trail.length ? trail[trail.length - 1] : null;
+            const minStep = Math.max(6, spacing * 0.55);
+            if (
+              !lastPt ||
+              (h.tipX - lastPt.x) ** 2 + (h.tipY - lastPt.y) ** 2 > minStep * minStep
+            ) {
+              trail.push({ x: h.tipX, y: h.tipY });
+              if (trail.length > 44) {
+                trail.shift();
+              }
+            }
+            // Prune followers invalidated by a shape rebuild, then mark live ones.
+            let w = 0;
+            for (let k = 0; k < h.followers.length; k += 1) {
+              if (h.followers[k] < walkers.length) {
+                h.followers[w] = h.followers[k];
+                w += 1;
+              }
+            }
+            h.followers.length = w;
+            for (let k = 0; k < h.followers.length; k += 1) {
+              followingSet.add(h.followers[k]);
+            }
+            // Recruit one walker per frame — the line grows person by person.
+            if (h.followers.length < 22) {
+              let best = -1;
+              let bestD = handRadius * handRadius;
+              for (let i = 0; i < walkers.length; i += 1) {
+                if (followingSet.has(i) || grabbedBy.has(i)) continue;
+                const dx = walkers[i].x - h.tipX;
+                const dy = walkers[i].y - h.tipY;
+                const dd = dx * dx + dy * dy;
+                if (dd < bestD) {
+                  bestD = dd;
+                  best = i;
+                }
+              }
+              if (best >= 0) {
+                h.followers.push(best);
+                followingSet.add(best);
+              }
+            }
+            // Follower k chases the breadcrumb (k+1) gaps behind the fingertip.
+            const gap = 3;
+            for (let k = 0; k < h.followers.length; k += 1) {
+              const ti = Math.max(0, trail.length - 1 - (k + 1) * gap);
+              if (trail.length) {
+                followTargets.set(h.followers[k], trail[ti]);
+              }
+            }
+          } else if (h.followers.length || h.trail.length) {
+            // Gesture ended → the line dissolves and everyone strolls home.
+            h.followers.length = 0;
+            h.trail.length = 0;
+          }
+        }
+      }
+
       if (!pausedRef.current) {
         for (let i = 0; i < walkers.length; i += 1) {
           const wkr = walkers[i];
@@ -676,54 +579,148 @@ export function WebcamWalkersOverlay({
             wkr.vy = 0;
             wkr.placed = true;
           }
-          // Which hand acts hardest on this walker? (localized → only the swept band
-          // moves; everyone else holds formation, so no whole-crowd scatter.)
-          let infl = 0;
-          let pushAng = 0;
-          let handSpd = 0;
+          wkr.held = false;
+
+          // Carried by a pinch: hang from the fingers, legs scrambling in the air.
+          const carrier = grabbedBy.get(i);
+          if (carrier) {
+            wkr.held = true;
+            wkr.x = carrier.pinchX + Math.sin(t * 4.6 + wkr.wSeed) * figureSize * 0.05;
+            wkr.y = carrier.pinchY + figureSize * 0.24;
+            wkr.vx = carrier.vx; // inherited so a release becomes a throw
+            wkr.vy = carrier.vy;
+            wkr.fall = 0;
+            wkr.disp = 1;
+            wkr.heat += (1 - wkr.heat) * clamp(0.35 * dt, 0, 1);
+            wkr.phase = (wkr.phase + 0.42 * dt) % twoPi;
+            if (carrier.vx > 0.3) {
+              wkr.face = 1;
+            } else if (carrier.vx < -0.3) {
+              wkr.face = -1;
+            }
+            continue;
+          }
+
+          // Dropped: a short tumble under gravity, then lie where they landed.
+          if (wkr.fall > 0) {
+            wkr.vy += 0.55 * dt;
+            wkr.vx *= Math.pow(0.94, dt);
+            wkr.x += wkr.vx * dt;
+            wkr.y += wkr.vy * dt;
+            wkr.fall = Math.max(0, wkr.fall - dt / 24);
+            if (wkr.fall === 0) {
+              wkr.vx = 0;
+              wkr.vy = 0;
+            }
+            wkr.heat += (0.6 - wkr.heat) * clamp(0.12 * dt, 0, 1);
+            wkr.phase = (wkr.phase + 0.5 * dt) % twoPi;
+            continue;
+          }
+
+          // Hand influences. Open palms shove — and their forces SUM, so two palms
+          // closing in squeeze the crowd caught between them. A fist gathers instead
+          // (strongest one wins); pinch/point hands exert no field at all.
+          let pushX = 0;
+          let pushY = 0;
+          let pushInfl = 0;
+          let pushMark = 0;
+          let gatherInfl = 0;
+          let gatherX = 0;
+          let gatherY = 0;
           for (let hi = 0; hi < hands.length; hi += 1) {
             const h = hands[hi];
             if (h.active <= 0.01) continue;
+            if (h.gesture === "pinch" || h.gesture === "point") continue;
             const ddx = wkr.x - h.x;
             const ddy = wkr.y - h.y;
             const d = Math.hypot(ddx, ddy);
+            if (h.gesture === "fist") {
+              const gatherRadius = handRadius * 1.35;
+              if (d >= gatherRadius) continue;
+              const r = 1 - d / gatherRadius;
+              const f = r * r * (3 - 2 * r) * h.active;
+              if (f > gatherInfl) {
+                gatherInfl = f;
+                gatherX = h.x;
+                gatherY = h.y;
+              }
+              continue;
+            }
             if (d >= handRadius) continue;
             const r = 1 - d / handRadius;
             const f = r * r * (3 - 2 * r) * h.active; // smooth: strong core, soft edge
-            if (f > infl) {
-              infl = f;
-              handSpd = Math.hypot(h.vx, h.vy);
-              const radial =
-                ddx === 0 && ddy === 0 ? hash(wkr.wSeed) * twoPi : Math.atan2(ddy, ddx);
-              if (handSpd > 0.25) {
-                // Blend "away from hand" with the hand's sweep direction, weighting the
-                // sweep more as it moves faster → people are shoved AHEAD into a pile.
-                const w = clamp(handSpd / handFullSpeed, 0, 1);
-                const bx = Math.cos(radial) * (1 - w) + (h.vx / handSpd) * w;
-                const by = Math.sin(radial) * (1 - w) + (h.vy / handSpd) * w;
-                pushAng = Math.atan2(by, bx);
-              } else {
-                pushAng = radial;
-              }
+            const handSpd = Math.hypot(h.vx, h.vy);
+            const radial =
+              ddx === 0 && ddy === 0 ? hash(wkr.wSeed) * twoPi : Math.atan2(ddy, ddx);
+            let pushAng = radial;
+            if (handSpd > 0.25) {
+              // Blend "away from hand" with the hand's sweep direction, weighting the
+              // sweep more as it moves faster → people are shoved AHEAD into a pile.
+              const w = clamp(handSpd / handFullSpeed, 0, 1);
+              const bx = Math.cos(radial) * (1 - w) + (h.vx / handSpd) * w;
+              const by = Math.sin(radial) * (1 - w) + (h.vy / handSpd) * w;
+              pushAng = Math.atan2(by, bx);
             }
-          }
-
-          // Hand on them → turn and WALK away. Strength scales with proximity AND hand
-          // speed, so a sweep shoves hard while a resting hand only nudges.
-          if (infl > 0.02) {
             const drive = clamp(handSpd / handFullSpeed, 0.16, 1);
             // Messy panic: a per-walker, time-varying heading wobble (only while the
             // hand actually moves) so they scatter chaotically, not in lockstep.
             const wobble = snoise(t * 2.3, wkr.wSeed * 1.7) * panicNoise * drive;
             const ang = pushAng + (hash(wkr.wSeed) - 0.5) * pushJitter + wobble;
             // Quicken the pace while actively shoved — varied per person, never uniform.
-            const panic = 1 + panicGain * drive * infl * (0.7 + hash(wkr.wSeed + 3) * 0.7);
-            const pace = fleeSpeed * wkr.sMul * infl * drive * panic;
-            wkr.vx += (Math.cos(ang) * pace - wkr.vx) * fleeAccel * dt;
-            wkr.vy += (Math.sin(ang) * pace - wkr.vy) * fleeAccel * dt;
-            if (infl * drive > 0.1) {
+            const panic = 1 + panicGain * drive * f * (0.7 + hash(wkr.wSeed + 3) * 0.7);
+            const pace = fleeSpeed * wkr.sMul * f * drive * panic;
+            pushX += Math.cos(ang) * pace;
+            pushY += Math.sin(ang) * pace;
+            pushInfl = Math.max(pushInfl, f);
+            pushMark = Math.max(pushMark, f * drive);
+          }
+
+          const followTo = followTargets.get(i);
+
+          let heatTarget: number;
+          if (pushInfl > 0.02) {
+            // Shoved by open palm(s) — cap the summed target so two hands can't fling.
+            const mag = Math.hypot(pushX, pushY);
+            const cap = fleeSpeed * wkr.sMul * 1.55;
+            if (mag > cap) {
+              pushX *= cap / mag;
+              pushY *= cap / mag;
+            }
+            wkr.vx += (pushX - wkr.vx) * fleeAccel * dt;
+            wkr.vy += (pushY - wkr.vy) * fleeAccel * dt;
+            if (pushMark > 0.1) {
               wkr.disp = 1;
             }
+            heatTarget = clamp(pushInfl * 1.5, 0, 1);
+          } else if (followTo) {
+            // Conga line: march after your assigned breadcrumb.
+            const dx = followTo.x - wkr.x;
+            const dy = followTo.y - wkr.y;
+            const dist = Math.hypot(dx, dy) || 1;
+            const want = Math.min(returnSpeed * 1.5, dist * 0.15) * wkr.sMul;
+            wkr.vx += ((dx / dist) * want - wkr.vx) * 0.15 * dt;
+            wkr.vy += ((dy / dist) * want - wkr.vy) * 0.15 * dt;
+            wkr.vx *= homeDamping;
+            wkr.vy *= homeDamping;
+            wkr.disp = 0; // mobilized — when the line dissolves they stroll home
+            heatTarget = 0.35;
+          } else if (gatherInfl > 0.03) {
+            // Fist: come stand in a loose ring around it, follow when it moves.
+            const stopDist = figureSize * (0.85 + hash(wkr.wSeed + 5) * 0.9);
+            const dx = gatherX - wkr.x;
+            const dy = gatherY - wkr.y;
+            const dist = Math.hypot(dx, dy) || 1;
+            const inward = dist - stopDist;
+            if (inward > 1) {
+              const want = Math.min(returnSpeed * 1.6, inward * 0.16) * wkr.sMul;
+              wkr.vx += ((dx / dist) * want - wkr.vx) * 0.16 * dt;
+              wkr.vy += ((dy / dist) * want - wkr.vy) * 0.16 * dt;
+            } else {
+              wkr.vx *= pileDamping;
+              wkr.vy *= pileDamping;
+            }
+            wkr.disp = 0; // engaged with the fist, not shoved debris
+            heatTarget = 0.45 * gatherInfl + 0.15;
           } else if (wkr.disp > 0.5) {
             // Shoved aside, hand no longer on them → hold as a heap. Pile persists while
             // a hand is still on screen; fades the instant it leaves → they walk home.
@@ -732,6 +729,7 @@ export function WebcamWalkersOverlay({
             }
             wkr.vx *= pileDamping;
             wkr.vy *= pileDamping;
+            heatTarget = 0.3;
           } else {
             // Walk home at the chosen stroll pace — brisk while far, easing as they
             // arrive. They DON'T beeline: a per-person side bias + a slow meander curve
@@ -763,6 +761,7 @@ export function WebcamWalkersOverlay({
             wkr.vy += (ny * want - wkr.vy) * returnAccel * dt;
             wkr.vx *= homeDamping;
             wkr.vy *= homeDamping;
+            heatTarget = 0;
           }
 
           const sp = Math.hypot(wkr.vx, wkr.vy);
@@ -777,7 +776,6 @@ export function WebcamWalkersOverlay({
 
           // Heat → color: hand on them = Hot, piled = Field-warm, calm/returning cools
           // back to Core. Rises fast (a startle), falls slowly (cooling as they settle).
-          const heatTarget = clamp(infl * 1.5 + (wkr.disp > 0.5 ? 0.3 : 0), 0, 1);
           const heatRate = heatTarget > wkr.heat ? 0.3 : 0.05;
           wkr.heat += (heatTarget - wkr.heat) * clamp(heatRate * dt, 0, 1);
 
@@ -799,7 +797,7 @@ export function WebcamWalkersOverlay({
       }
 
       // --- Render ---
-      if (cameraActive.current && video) {
+      if (video && video.readyState >= 2) {
         drawCover(video);
         ctx.fillStyle = "rgba(2, 5, 10, 0.46)";
         ctx.fillRect(0, 0, cssW, cssH);
@@ -815,10 +813,16 @@ export function WebcamWalkersOverlay({
       ctx.imageSmoothingEnabled = true;
       // Back-to-front: smaller y (farther) drawn first, larger y (nearer) drawn last,
       // so the front row occludes the rows behind it — consistent depth in the crowd.
+      // A carried walker is lifted above everyone, so it always draws on top.
       if (drawOrder.length !== walkers.length) {
         drawOrder = walkers.map((_, idx) => idx);
       }
-      drawOrder.sort((a, b) => walkers[a].y - walkers[b].y);
+      drawOrder.sort(
+        (a, b) =>
+          walkers[a].y +
+          (walkers[a].held ? 1e5 : 0) -
+          (walkers[b].y + (walkers[b].held ? 1e5 : 0))
+      );
       for (let oi = 0; oi < drawOrder.length; oi += 1) {
         const wkr = walkers[drawOrder[oi]];
         let f = Math.floor((wkr.phase / twoPi) * WALK_FRAMES) % WALK_FRAMES;
@@ -828,7 +832,21 @@ export function WebcamWalkersOverlay({
         const sx = f * SPRITE_CELL;
         const heatStep = clamp(Math.round(wkr.heat * (PALETTE_STEPS - 1)), 0, PALETTE_STEPS - 1);
         const sy = (heatStep * GENDERS + wkr.gender) * SPRITE_CELL;
-        if (wkr.face < 0) {
+        if (wkr.held || wkr.fall > 0) {
+          // Dangling from a pinch: a pendulum sway. Tumbling after a drop: a roll.
+          ctx.save();
+          ctx.translate(wkr.x, wkr.y);
+          ctx.rotate(
+            wkr.held
+              ? Math.sin(now * 0.004 + wkr.wSeed) * 0.28
+              : (1 - wkr.fall) * 1.3 * wkr.face
+          );
+          if (wkr.face < 0) {
+            ctx.scale(-1, 1);
+          }
+          ctx.drawImage(walkerSheet, sx, sy, SPRITE_CELL, SPRITE_CELL, -half, -half, size, size);
+          ctx.restore();
+        } else if (wkr.face < 0) {
           ctx.save();
           ctx.translate(wkr.x, wkr.y);
           ctx.scale(-1, 1);
@@ -847,7 +865,7 @@ export function WebcamWalkersOverlay({
       window.removeEventListener("resize", resize);
       resizeObserver?.disconnect();
     };
-  }, [walkerSheet]);
+  }, [walkerSheet, handsRef, videoRef]);
 
   return (
     <div ref={containerRef} className="webcam-walkers-overlay" aria-hidden="true">
@@ -856,7 +874,7 @@ export function WebcamWalkersOverlay({
         {status === "requesting" && "Requesting camera…"}
         {status === "active" &&
           (modelReady
-            ? "Walkers · move your hand to push the crowd"
+            ? "Walkers · open hand pushes · fist gathers · pinch lifts · finger leads"
             : "Loading hand tracker…")}
         {status === "denied" && "Camera denied — crowd marches in place"}
         {status === "unsupported" && "Camera needs HTTPS or localhost"}
