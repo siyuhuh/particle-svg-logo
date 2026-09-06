@@ -3093,6 +3093,7 @@ const sdfBubbleFragmentShader = `
       float d = length(offset) - puff.z;
       // Keep individual round lobes and small gaps visible at every puff size.
       float blend = min(0.007, puff.z * 0.38);
+      if (d > field.x + blend) continue;
       float h = clamp(0.5 + 0.5 * (d - field.x) / blend, 0.0, 1.0);
       vec2 q = offset / puff.z;
       float crown = sqrt(max(0.0, 1.0 - dot(q, q)));
@@ -3128,7 +3129,6 @@ type SdfBubble = {
   seed: number;
   cycleRate: number;
   cyclePhase: number;
-  spawnY: number;
   age: number;
   lifetime: number;
   opacity: number;
@@ -3340,26 +3340,6 @@ function createAquariumEmitters(origins: THREE.Vector2[], mask: SdfMaskSampler) 
   return emitters.length > 0 ? emitters : origins;
 }
 
-function pickAquariumRiserSpawn(
-  origins: THREE.Vector2[],
-  mask: SdfMaskSampler,
-  box: { minX: number; maxX: number; minY: number; maxY: number }
-) {
-  const emitters = createAquariumEmitters(origins, mask);
-  const origin = emitters[Math.floor(Math.random() * emitters.length)] ?? origins[0] ?? new THREE.Vector2();
-  const spread = 0.006 + Math.random() * 0.012;
-  const candidate = new THREE.Vector2(
-    THREE.MathUtils.clamp(origin.x + (Math.random() - 0.5) * spread * 2.4, box.minX, box.maxX),
-    THREE.MathUtils.clamp(origin.y + (Math.random() - 0.5) * spread * 2.1, box.minY, box.maxY)
-  );
-
-  if (mask.clearance(candidate.x, candidate.y) > 0.002 && mask.sample(candidate.x, candidate.y) > 0.28) {
-    return candidate;
-  }
-
-  return origin.clone();
-}
-
 function pickAquariumBodySpawn(
   origins: THREE.Vector2[],
   mask: SdfMaskSampler,
@@ -3368,7 +3348,7 @@ function pickAquariumBodySpawn(
   total: number
 ) {
   const stride = Math.max(1, Math.floor(origins.length / Math.max(total, 1)));
-  const origin = origins[Math.min(origins.length - 1, index * stride)] ?? origins[0];
+  const origin = origins[Math.min(origins.length - 1, index * stride)] ?? new THREE.Vector2();
 
   for (let attempt = 0; attempt < 24; attempt += 1) {
     const candidate = new THREE.Vector2(
@@ -3389,7 +3369,7 @@ function pickAquariumBodySpawn(
     }
   }
 
-  return origin?.clone() ?? pickInteriorSpawnPoint(origins, mask, box, 0.5, 0.003);
+  return origin.clone();
 }
 
 function sdfSeedFraction(seed: number) {
@@ -3487,7 +3467,6 @@ function resetAquariumBubble(
   bubble.age = warmStart ? Math.random() * bubble.lifetime : 0;
   bubble.pos.copy(origin);
   bubble.pos.x += (Math.random() - 0.5) * 0.018 * settings.scatterRadius;
-  bubble.spawnY = bubble.pos.y;
   bubble.anchorX = bubble.pos.x;
   bubble.anchorY = bubble.pos.y;
   bubble.vel.set((bubble.seed - 0.5) * 0.012, speed);
@@ -3744,7 +3723,6 @@ function SdfBubbleLogo({
         seed: Math.random(),
         cycleRate: 1,
         cyclePhase: 0,
-        spawnY: 0,
         age: 0,
         lifetime: 1,
         opacity: 0,
@@ -3769,6 +3747,7 @@ function SdfBubbleLogo({
     const nextKey = `${svgText}:${replayNonce}:${settings.particleCount}:${settings.pointSize}:${settings.sdfMotionMode}`;
     if (simulationKey.current === nextKey && bubbles.current.length > 0) {
       maskSampler.current = mask;
+      aquariumEmitters.current = createAquariumEmitters(spawnOrigins.current, mask);
       return;
     }
 
@@ -3941,7 +3920,9 @@ function SdfBubbleLogo({
         if (aquarium && bubble.role === "riser") {
           // Freeze aging during a gesture so a gathered puff cannot teleport out
           // of the user's hand. Recycling only happens after it is invisible.
-          bubble.age += stepDt * (1 - bubble.interaction);
+          const lifetime = (0.1 + bubble.seed * 0.19) / (0.025 + settings.animationSpeed * 0.055);
+          bubble.age = (bubble.age / bubble.lifetime) * lifetime + stepDt * (1 - bubble.interaction);
+          bubble.lifetime = lifetime;
           updateAquariumBubbleAppearance(bubble, time);
           if (bubble.age >= bubble.lifetime) {
             resetAquariumBubble(bubble, aquariumEmitters.current, settings);
@@ -4083,7 +4064,6 @@ function createSdfBubble(
     seed,
     cycleRate: cycle.cycleRate,
     cyclePhase: cycle.cyclePhase,
-    spawnY: pos.y,
     age: 0,
     lifetime: 1,
     opacity: 1,
