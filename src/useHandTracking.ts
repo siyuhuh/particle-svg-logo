@@ -30,6 +30,8 @@ export type TrackedHand = {
   vy: number;
   active: number;
   seen: number;
+  /** How long (60fps-frame units) the hand has hovered nearly still. */
+  still: number;
   /** Debounced gesture. */
   gesture: HandGesture;
   /** Thumb↔index midpoint, view-local css px. */
@@ -222,6 +224,8 @@ export function useHandTracking({ enabled, viewRef }: UseHandTrackingOptions) {
           h.y = d.y;
           h.active = 1;
           h.seen = 1;
+          h.still =
+            Math.hypot(h.vx, h.vy) < 1.4 ? h.still + dt : Math.max(0, h.still * 0.5);
           h.pinchX = d.pinchX;
           h.pinchY = d.pinchY;
           h.tipX = d.tipX;
@@ -243,6 +247,7 @@ export function useHandTracking({ enabled, viewRef }: UseHandTrackingOptions) {
             vy: 0,
             active: 1,
             seen: 1,
+            still: 0,
             gesture: d.gesture,
             pinchX: d.pinchX,
             pinchY: d.pinchY,
@@ -259,6 +264,7 @@ export function useHandTracking({ enabled, viewRef }: UseHandTrackingOptions) {
       for (let i = hands.length - 1; i >= 0; i -= 1) {
         if (!hands[i].seen) {
           hands[i].active = Math.max(0, hands[i].active - dt * 0.5);
+          hands[i].still = 0;
           hands[i].vx *= 0.85;
           hands[i].vy *= 0.85;
           if (hands[i].active <= 0.001) {

@@ -38,6 +38,12 @@ type Walker = {
   fall: number;
   /** True this frame while dangling from a pinch — drawn last, with a sway. */
   held: boolean;
+  /** >0 while bowled over by a fast sweep — lies flat, then gets back up. */
+  down: number;
+  /** >0 while stopped for a chance chat with a passing neighbour. */
+  chat: number;
+  /** Which way to face while chatting (toward the partner). */
+  chatDir: number;
 };
 
 // Walk-cycle sprite sheet. Rows = PALETTE_STEPS heat steps × GENDERS (male, female).
@@ -297,7 +303,10 @@ export function WebcamWalkersOverlay({
         gender: old ? old.gender : Math.random() < 0.5 ? 0 : 1,
         heat: old ? old.heat : 0,
         fall: old ? old.fall : 0,
-        held: false
+        held: false,
+        down: old ? old.down : 0,
+        chat: 0,
+        chatDir: old ? old.chatDir : 1
       };
     });
     walkersRef.current = next;
@@ -498,6 +507,7 @@ export function WebcamWalkersOverlay({
             wk.vy = Math.max(1.6, h.vy * 0.6 + 1.8);
             wk.fall = 1;
             wk.disp = 1;
+            wk.chat = 0;
             h.grabbedIndex = -1;
           }
           if (h.grabbedIndex >= 0) {
@@ -565,6 +575,36 @@ export function WebcamWalkersOverlay({
         }
       }
 
+      // Chance encounters: two strollers passing close sometimes stop face to
+      // face for a moment, then walk on. Only while no hand is working the crowd
+      // and only for walkers actually in motion — the standing formation stays
+      // still. Sampled (not O(n²)): a few random probes against nearby indices,
+      // which the grid sampling keeps roughly spatially coherent.
+      if (!pausedRef.current && !handActive) {
+        const maxD2 = (spacing * 1.15) ** 2;
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          const i = (Math.random() * walkers.length) | 0;
+          const a = walkers[i];
+          if (!a || a.chat > 0 || a.disp > 0.5 || a.down > 0 || a.fall > 0) continue;
+          if (Math.hypot(a.vx, a.vy) < 0.25) continue;
+          const jEnd = Math.min(walkers.length, i + 34);
+          for (let j = i + 1; j < jEnd; j += 1) {
+            const b = walkers[j];
+            if (b.chat > 0 || b.disp > 0.5 || b.down > 0 || b.fall > 0) continue;
+            const dd = (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+            if (dd > maxD2) continue;
+            if (Math.random() < 0.18) {
+              const dur = 110 + Math.random() * 120;
+              a.chat = dur;
+              b.chat = dur * (0.85 + Math.random() * 0.3);
+              a.chatDir = b.x >= a.x ? 1 : -1;
+              b.chatDir = -a.chatDir;
+            }
+            break;
+          }
+        }
+      }
+
       if (!pausedRef.current) {
         for (let i = 0; i < walkers.length; i += 1) {
           const wkr = walkers[i];
@@ -585,6 +625,7 @@ export function WebcamWalkersOverlay({
           const carrier = grabbedBy.get(i);
           if (carrier) {
             wkr.held = true;
+            wkr.chat = 0;
             wkr.x = carrier.pinchX + Math.sin(t * 4.6 + wkr.wSeed) * figureSize * 0.05;
             wkr.y = carrier.pinchY + figureSize * 0.24;
             wkr.vx = carrier.vx; // inherited so a release becomes a throw
@@ -617,6 +658,17 @@ export function WebcamWalkersOverlay({
             continue;
           }
 
+          // Bowled over by a hard sweep: lie flat for a beat, then get back up.
+          if (wkr.down > 0) {
+            wkr.down = Math.max(0, wkr.down - dt / 95);
+            wkr.vx *= pileDamping;
+            wkr.vy *= pileDamping;
+            wkr.x += wkr.vx * dt;
+            wkr.y += wkr.vy * dt;
+            wkr.heat += (0.75 - wkr.heat) * clamp(0.2 * dt, 0, 1);
+            continue;
+          }
+
           // Hand influences. Open palms shove — and their forces SUM, so two palms
           // closing in squeeze the crowd caught between them. A fist gathers instead
           // (strongest one wins); pinch/point hands exert no field at all.
@@ -627,6 +679,9 @@ export function WebcamWalkersOverlay({
           let gatherInfl = 0;
           let gatherX = 0;
           let gatherY = 0;
+          let watchInfl = 0;
+          let watchX = 0;
+          let watchY = 0;
           for (let hi = 0; hi < hands.length; hi += 1) {
             const h = hands[hi];
             if (h.active <= 0.01) continue;
@@ -643,6 +698,20 @@ export function WebcamWalkersOverlay({
                 gatherInfl = f;
                 gatherX = h.x;
                 gatherY = h.y;
+              }
+              continue;
+            }
+            // An open palm hovering still for ~a second stops shoving and turns
+            // into a curiosity: nearby walkers wander over to have a look.
+            if (h.still > 55) {
+              const watchRadius = handRadius * 1.5;
+              if (d >= watchRadius) continue;
+              const r = 1 - d / watchRadius;
+              const f = r * r * (3 - 2 * r) * h.active;
+              if (f > watchInfl) {
+                watchInfl = f;
+                watchX = h.x;
+                watchY = h.y;
               }
               continue;
             }
@@ -688,8 +757,16 @@ export function WebcamWalkersOverlay({
             }
             wkr.vx += (pushX - wkr.vx) * fleeAccel * dt;
             wkr.vy += (pushY - wkr.vy) * fleeAccel * dt;
+            wkr.chat = 0;
             if (pushMark > 0.1) {
               wkr.disp = 1;
+            }
+            // A hard, fast sweep can bowl someone over — they tumble, lie a
+            // beat, then pick themselves up (down branch above).
+            if (pushMark > 0.42 && Math.random() < 0.03 * dt) {
+              wkr.down = 1;
+              wkr.vx *= 1.5;
+              wkr.vy *= 1.5;
             }
             heatTarget = clamp(pushInfl * 1.5, 0, 1);
           } else if (followTo) {
@@ -703,6 +780,7 @@ export function WebcamWalkersOverlay({
             wkr.vx *= homeDamping;
             wkr.vy *= homeDamping;
             wkr.disp = 0; // mobilized — when the line dissolves they stroll home
+            wkr.chat = 0;
             heatTarget = 0.35;
           } else if (gatherInfl > 0.03) {
             // Fist: come stand in a loose ring around it, follow when it moves.
@@ -720,7 +798,30 @@ export function WebcamWalkersOverlay({
               wkr.vy *= pileDamping;
             }
             wkr.disp = 0; // engaged with the fist, not shoved debris
+            wkr.chat = 0;
             heatTarget = 0.45 * gatherInfl + 0.15;
+          } else if (watchInfl > 0.04) {
+            // Curiosity: amble over to a still hand and stand in a loose circle
+            // around it, facing it — a crowd gathering to see what's going on.
+            const stopDist = handRadius * (0.55 + hash(wkr.wSeed + 11) * 0.4);
+            const dx = watchX - wkr.x;
+            const dy = watchY - wkr.y;
+            const dist = Math.hypot(dx, dy) || 1;
+            const inward = dist - stopDist;
+            if (inward > 2) {
+              const want = Math.min(returnSpeed * 0.75, inward * 0.07) * wkr.sMul;
+              wkr.vx += ((dx / dist) * want - wkr.vx) * 0.08 * dt;
+              wkr.vy += ((dy / dist) * want - wkr.vy) * 0.08 * dt;
+              wkr.vx *= homeDamping;
+              wkr.vy *= homeDamping;
+            } else {
+              wkr.vx *= pileDamping;
+              wkr.vy *= pileDamping;
+              wkr.face = watchX >= wkr.x ? 1 : -1;
+            }
+            wkr.disp = 0;
+            wkr.chat = 0;
+            heatTarget = 0.18;
           } else if (wkr.disp > 0.5) {
             // Shoved aside, hand no longer on them → hold as a heap. Pile persists while
             // a hand is still on screen; fades the instant it leaves → they walk home.
@@ -730,6 +831,13 @@ export function WebcamWalkersOverlay({
             wkr.vx *= pileDamping;
             wkr.vy *= pileDamping;
             heatTarget = 0.3;
+          } else if (wkr.chat > 0) {
+            // Stopped for a chance chat: stand facing the partner, then move on.
+            wkr.chat = Math.max(0, wkr.chat - dt);
+            wkr.vx *= pileDamping;
+            wkr.vy *= pileDamping;
+            wkr.face = wkr.chatDir;
+            heatTarget = 0.12;
           } else {
             // Walk home at the chosen stroll pace — brisk while far, easing as they
             // arrive. They DON'T beeline: a per-person side bias + a slow meander curve
@@ -832,15 +940,23 @@ export function WebcamWalkersOverlay({
         const sx = f * SPRITE_CELL;
         const heatStep = clamp(Math.round(wkr.heat * (PALETTE_STEPS - 1)), 0, PALETTE_STEPS - 1);
         const sy = (heatStep * GENDERS + wkr.gender) * SPRITE_CELL;
-        if (wkr.held || wkr.fall > 0) {
-          // Dangling from a pinch: a pendulum sway. Tumbling after a drop: a roll.
+        if (wkr.held || wkr.fall > 0 || wkr.down > 0) {
+          // Dangling from a pinch: a pendulum sway. Tumbling after a drop: a
+          // roll. Bowled over: tip flat fast, lie, then tilt back up at the end.
           ctx.save();
           ctx.translate(wkr.x, wkr.y);
-          ctx.rotate(
-            wkr.held
-              ? Math.sin(now * 0.004 + wkr.wSeed) * 0.28
-              : (1 - wkr.fall) * 1.3 * wkr.face
-          );
+          let tilt: number;
+          if (wkr.held) {
+            tilt = Math.sin(now * 0.004 + wkr.wSeed) * 0.28;
+          } else if (wkr.fall > 0) {
+            tilt = (1 - wkr.fall) * 1.3 * wkr.face;
+          } else {
+            tilt =
+              wkr.face *
+              1.5 *
+              clamp(Math.min((1 - wkr.down) * 5, wkr.down * 5), 0, 1);
+          }
+          ctx.rotate(tilt);
           if (wkr.face < 0) {
             ctx.scale(-1, 1);
           }
