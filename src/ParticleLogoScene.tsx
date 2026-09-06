@@ -15,6 +15,9 @@ import {
 import { sampleSvgToParticles } from "./svgSampler";
 import { WebcamWalkersOverlay } from "./WebcamWalkersOverlay";
 import { HandPointerControl } from "./HandPointerControl";
+import { handInput } from "./handInput";
+import type { HandGesture } from "./handGestures";
+import type { TrackedHand } from "./useHandTracking";
 import type { LogoStyle, ParticleBuffers, ParticleSettings } from "./types";
 
 type ParticleLogoSceneProps = {
@@ -2042,7 +2045,12 @@ export function ParticleLogoScene({
           paused={paused}
         />
       )}
-      {!walkersStyle && settings.handControl && <HandPointerControl />}
+      {!walkersStyle && settings.handControl && (
+        <HandPointerControl
+          nativeGestures={sdfStyle}
+          hint={sdfStyle ? "Open palm · push   /   Fist · gather   /   Pinch · lift   /   Point · swirl" : undefined}
+        />
+      )}
       <div className="scene-scanlines" aria-hidden="true" />
       {settings.renderMode === "webgpu-tsl" && (
         <div className="render-mode-note">
@@ -3046,7 +3054,11 @@ const SDF_MASK_FIELD_SIZE = 256;
 const SDF_MAX_BUBBLE_SPEED = 0.18;
 
 function getSdfActiveBubbleCount(particleCount: number) {
-  return Math.min(SDF_BUBBLE_MAX, Math.max(128, Math.round(particleCount / 38)));
+  return Math.round(THREE.MathUtils.clamp(
+    128 + ((particleCount - 6000) / 42000) * (SDF_BUBBLE_MAX - 128),
+    128,
+    SDF_BUBBLE_MAX
+  ));
 }
 
 const sdfBubbleVertexShader = `
@@ -3061,61 +3073,47 @@ const sdfBubbleVertexShader = `
 const sdfBubbleFragmentShader = `
   precision highp float;
 
-  uniform sampler2D uMask;
-  uniform float uTime;
-  uniform float uReveal;
   uniform float uFlicker;
-  uniform vec2 uMouse;
-  uniform vec2 uDistortion;
+  uniform int uBubbleCount;
   uniform vec3 uColorPrimary;
   uniform vec3 uColorAccent;
   uniform vec3 uColorHighlight;
-  uniform vec3 uBubbles[${SDF_BUBBLE_MAX}];
+  uniform vec4 uBubbles[${SDF_BUBBLE_MAX}];
 
   varying vec2 vUv;
 
-  float smin(float a, float b, float k) {
-    float h = max(k - abs(a - b), 0.0) / k;
-    return min(a, b) - h * h * k * 0.25;
-  }
-
-  float sceneDist(vec2 p) {
-    float d = 1000.0;
-
+  vec3 cloudField(vec2 p) {
+    vec3 field = vec3(1000.0, 1.0, 0.0);
     for (int j = 0; j < ${SDF_BUBBLE_MAX}; j++) {
-      float bubbleRadius = uBubbles[j].z;
-      if (bubbleRadius >= 0.0005) {
-        float bubble = length(p - uBubbles[j].xy) - bubbleRadius;
-        d = smin(d, bubble, 0.015);
-      }
-    }
+      if (j >= uBubbleCount) break;
+      vec4 puff = uBubbles[j];
+      if (puff.z < 0.0002 || puff.w < 0.002) continue;
 
-    return d;
+      vec2 offset = p - puff.xy;
+      float d = length(offset) - puff.z;
+      // Keep individual round lobes and small gaps visible at every puff size.
+      float blend = min(0.007, puff.z * 0.38);
+      float h = clamp(0.5 + 0.5 * (d - field.x) / blend, 0.0, 1.0);
+      vec2 q = offset / puff.z;
+      float crown = sqrt(max(0.0, 1.0 - dot(q, q)));
+      float shade = 0.86 + crown * 0.14;
+      field = mix(vec3(d, shade, puff.w), field, h);
+      field.x -= blend * h * (1.0 - h);
+    }
+    return field;
   }
 
   void main() {
     vec2 uv = (vUv - 0.5) * 2.0;
+    vec3 field = cloudField(uv);
+    float edge = max(fwidth(field.x) * 0.8, 0.0009);
+    float alpha = (1.0 - smoothstep(-edge, edge, field.x)) * field.z;
+    if (alpha < 0.002) discard;
 
-    float d = sceneDist(uv);
-    // Cotton, not glass: a wide fuzzy falloff instead of a crisp waterline, and
-    // NO mask clip — the silhouette is whatever the puffs bulge into, with stray
-    // satellite dots drifting free around it.
-    float alpha = smoothstep(0.0045, -0.0085, d);
-
-    vec3 color = vec3(0.0);
-
-    if (alpha > 0.003) {
-      float t = clamp(-d / 0.022, 0.0, 1.0);
-      float grain = (fract(sin(dot(uv * 180.0, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) * uFlicker * 0.05;
-
-      // Flat white puffs with faintly gray creases where blobs meet and along
-      // the rim — soft billowing clouds, no specular, no lighting.
-      vec3 base = mix(uColorAccent, uColorPrimary, 0.4 + t * 0.6);
-      color = base * (0.8 + t * 0.2);
-      color += uColorHighlight * t * 0.05;
-      color -= vec3(grain);
-    }
-
+    float grain = fract(sin(dot(uv * 180.0, vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
+    vec3 base = mix(uColorAccent, uColorPrimary, 0.75);
+    vec3 color = base * field.y + uColorHighlight * 0.025;
+    color -= grain * uFlicker * 0.05;
     gl_FragColor = vec4(max(color, vec3(0.0)), alpha);
   }
 `;
@@ -3131,6 +3129,10 @@ type SdfBubble = {
   cycleRate: number;
   cyclePhase: number;
   spawnY: number;
+  age: number;
+  lifetime: number;
+  opacity: number;
+  interaction: number;
   role: SdfBubbleRole;
   anchorX: number;
   anchorY: number;
@@ -3325,34 +3327,37 @@ function createSdfMaskSampler(canvas: HTMLCanvasElement): SdfMaskSampler | null 
   };
 }
 
+// Sample exposed upper edges once. Each disconnected part of the SVG can emit
+// puffs, including low islands and the lower edges of counters.
+function createAquariumEmitters(origins: THREE.Vector2[], mask: SdfMaskSampler) {
+  const emitters: THREE.Vector2[] = [];
+  for (let i = 0; i < origins.length; i += 3) {
+    const p = origins[i];
+    if (mask.sample(p.x, p.y) > 0.3 && mask.sample(p.x, p.y + 0.025) < 0.3) {
+      emitters.push(p.clone());
+    }
+  }
+  return emitters.length > 0 ? emitters : origins;
+}
+
 function pickAquariumRiserSpawn(
   origins: THREE.Vector2[],
   mask: SdfMaskSampler,
   box: { minX: number; maxX: number; minY: number; maxY: number }
 ) {
-  const spanY = box.maxY - box.minY;
-  const midY = box.minY + spanY * 0.52;
+  const emitters = createAquariumEmitters(origins, mask);
+  const origin = emitters[Math.floor(Math.random() * emitters.length)] ?? origins[0] ?? new THREE.Vector2();
+  const spread = 0.006 + Math.random() * 0.012;
+  const candidate = new THREE.Vector2(
+    THREE.MathUtils.clamp(origin.x + (Math.random() - 0.5) * spread * 2.4, box.minX, box.maxX),
+    THREE.MathUtils.clamp(origin.y + (Math.random() - 0.5) * spread * 2.1, box.minY, box.maxY)
+  );
 
-  for (let attempt = 0; attempt < 48; attempt += 1) {
-    const origin = origins[Math.floor(Math.random() * origins.length)] ?? new THREE.Vector2(0, 0);
-    const preferLow = Math.random() < 0.62;
-    if (preferLow && origin.y > midY && Math.random() < 0.7) {
-      continue;
-    }
-
-    const spread = 0.006 + Math.random() * 0.012;
-    const candidate = new THREE.Vector2(
-      THREE.MathUtils.clamp(origin.x + (Math.random() - 0.5) * spread * 2.4, box.minX, box.maxX),
-      THREE.MathUtils.clamp(origin.y + (Math.random() - 0.5) * spread * 2.1, box.minY, box.maxY)
-    );
-    const clearance = mask.clearance(candidate.x, candidate.y);
-
-    if (clearance > 0.002 && mask.sample(candidate.x, candidate.y) > 0.28) {
-      return candidate;
-    }
+  if (mask.clearance(candidate.x, candidate.y) > 0.002 && mask.sample(candidate.x, candidate.y) > 0.28) {
+    return candidate;
   }
 
-  return pickInteriorSpawnPoint(origins, mask, box, 0.55, 0.002);
+  return origin.clone();
 }
 
 function pickAquariumBodySpawn(
@@ -3402,110 +3407,96 @@ function createSdfBubbleCycle(seed: number) {
 function applySdfAquariumRise(
   bubble: SdfBubble,
   time: number,
-  riseSpeed: number,
-  noise: number,
-  spin: number,
-  subDt: number
+  speed: number,
+  turbulence: number,
+  spread: number,
+  dt: number
 ) {
   const phase = bubble.cyclePhase;
-  const rate = bubble.cycleRate;
-  const px = bubble.pos.x * 5.4 + phase;
-  const py = bubble.pos.y * 4.6 - phase * 0.7;
-
-  const fieldX =
-    Math.sin(px + time * spin * 0.74) * Math.cos(py - time * spin * 0.58) * 0.62 +
-    Math.cos(time * rate * 1.18 + phase + bubble.pos.y * 3.6) * 0.38;
-  const swayX = Math.cos(time * rate + phase + bubble.pos.y * 2.2) * 0.44;
-  const risePulse = 0.78 + 0.22 * Math.sin(time * rate + phase);
-
-  bubble.vel.x += (fieldX * noise + swayX * noise * 0.55) * subDt;
-  bubble.vel.y += riseSpeed * risePulse * subDt * 2.8;
-  bubble.vel.x *= 0.985;
+  const progress = THREE.MathUtils.clamp(bubble.age / bubble.lifetime, 0, 1);
+  // Nearby puffs share a current, while their own wobble prevents lockstep motion.
+  const current = Math.sin(bubble.pos.y * 8 - time * 0.65 + bubble.anchorX * 5);
+  const wobble = Math.sin(time * bubble.cycleRate * 1.4 + phase);
+  const targetX = current * (0.007 + turbulence * 0.018) +
+    wobble * 0.012 * spread + (bubble.seed - 0.5) * spread * 0.016;
+  const targetY = speed * (0.65 + Math.sqrt(bubble.baseRadius / 0.016) * 0.5) *
+    (0.7 + progress * 0.55);
+  const response = (1 - Math.exp(-2.6 * dt)) * (1 - bubble.interaction * 0.8);
+  bubble.vel.x += (targetX - bubble.vel.x) * response;
+  bubble.vel.y += (targetY - bubble.vel.y) * response;
 }
 
 function applySdfAquariumBodyMotion(
   bubble: SdfBubble,
   time: number,
-  breathe: number,
-  subDt: number
+  settings: ParticleSettings,
+  dt: number
 ) {
-  const dx = bubble.anchorX - bubble.pos.x;
-  const dy = bubble.anchorY - bubble.pos.y;
-  bubble.vel.x += dx * 2.4 * subDt;
-  bubble.vel.y += dy * 2.4 * subDt;
-  bubble.vel.x += Math.sin(time * bubble.cycleRate + bubble.cyclePhase) * breathe * 0.0016;
-  bubble.vel.y += Math.cos(time * bubble.cycleRate * 0.8 + bubble.cyclePhase) * breathe * 0.0011;
-  bubble.vel.multiplyScalar(0.9);
+  const phase = bubble.cyclePhase;
+  const amount = 0.006 + settings.turbulence * 0.014;
+  const wave = time * (0.5 + settings.animationSpeed) - bubble.anchorY * 7;
+  const targetX = bubble.anchorX + Math.sin(wave + bubble.anchorX * 5) * amount +
+    Math.sin(time * bubble.cycleRate + phase) * amount * 0.45;
+  const targetY = bubble.anchorY + Math.cos(wave * 0.8 + phase) * amount * 0.65;
+  const pull = (2.5 + settings.attractRadius * 5) * (1 - bubble.interaction * 0.94);
+  bubble.vel.x += (targetX - bubble.pos.x) * pull * dt;
+  bubble.vel.y += (targetY - bubble.pos.y) * pull * dt;
 }
 
 function createAquariumBaseRadius(sizeScale: number, role: SdfBubbleRole) {
+  const size = Math.random();
   if (role === "body") {
-    return (0.018 + Math.random() * 0.015) * sizeScale;
+    return (0.023 + Math.pow(size, 0.7) * 0.026) * sizeScale;
   }
-
-  return (0.0032 + Math.random() * 0.0044) * sizeScale;
+  // Mostly visible round puffs, with a few tiny crumbs and larger drifting lobes.
+  return (0.006 + Math.pow(size, 1.6) * 0.024) * sizeScale;
 }
 
 function getSdfAquariumBodyCount(total: number) {
-  return Math.max(48, Math.round(total * 0.38));
+  return Math.round(total * 0.68);
 }
 
-function getAquariumRiseT(
-  bubbleY: number,
-  spawnY: number,
-  maxY: number
-) {
-  const travel = Math.max(0.04, maxY - spawnY);
-  return THREE.MathUtils.clamp((bubbleY - spawnY) / travel, 0, 1);
-}
-
-function getAquariumBubbleRadius(
-  baseRadius: number,
-  riseT: number,
-  time: number,
-  cycleRate: number,
-  cyclePhase: number
-) {
-  const delayedT = Math.max(0, (riseT - 0.32) / 0.68);
-  const shrink = 1 - Math.pow(delayedT, 0.62) * 0.78;
-  const pulse = 1 + Math.sin(time * cycleRate + cyclePhase) * 0.062;
-  const breathe = 1 + Math.sin(time * cycleRate * 0.43 + cyclePhase * 1.27) * 0.034;
-  return baseRadius * Math.max(0.16, shrink) * pulse * breathe;
+function updateAquariumBubbleAppearance(bubble: SdfBubble, time: number) {
+  const progress = THREE.MathUtils.clamp(bubble.age / bubble.lifetime, 0, 1);
+  const birth = THREE.MathUtils.smoothstep(progress, 0, 0.12);
+  const dissolve = THREE.MathUtils.smoothstep(progress, 0.64, 1);
+  const swell = 0.74 + THREE.MathUtils.smoothstep(progress, 0, 0.4) * 0.34;
+  const pulse = 1 + Math.sin(time * bubble.cycleRate + bubble.cyclePhase) * 0.07;
+  bubble.radius = bubble.baseRadius * swell * (1 - dissolve * 0.65) * pulse;
+  bubble.opacity = birth * (1 - dissolve);
 }
 
 function resetAquariumBubble(
   bubble: SdfBubble,
-  origins: THREE.Vector2[],
-  box: { minX: number; maxX: number; minY: number; maxY: number },
+  emitters: THREE.Vector2[],
   settings: ParticleSettings,
-  mask: SdfMaskSampler | null
+  warmStart = false
 ) {
-  const sizeScale = 0.46 + settings.pointSize * 0.062;
+  const origin = emitters[Math.floor(Math.random() * emitters.length)] ?? new THREE.Vector2();
+  const countScale = Math.sqrt(274 / getSdfActiveBubbleCount(settings.particleCount));
+  const sizeScale = (0.46 + settings.pointSize * 0.062) * countScale;
   bubble.role = "riser";
-  const baseRadius = createAquariumBaseRadius(sizeScale, "riser");
-
-  bubble.baseRadius = baseRadius;
-  bubble.radius = baseRadius;
   bubble.seed = Math.random();
-
-  if (mask) {
-    bubble.pos.copy(pickAquariumRiserSpawn(origins, mask, box));
-  } else {
-    bubble.pos.set(
-      THREE.MathUtils.lerp(box.minX, box.maxX, Math.random()),
-      box.minY + (box.maxY - box.minY) * (0.15 + Math.random() * 0.55)
-    );
-  }
-
-  const cycle = createSdfBubbleCycle(bubble.seed + bubble.pos.x * 0.3);
+  bubble.baseRadius = createAquariumBaseRadius(sizeScale, "riser");
+  bubble.radius = bubble.baseRadius;
+  const cycle = createSdfBubbleCycle(bubble.seed + origin.x * 0.3);
   bubble.cycleRate = cycle.cycleRate;
   bubble.cyclePhase = cycle.cyclePhase;
+  const speed = 0.025 + settings.animationSpeed * 0.055;
+  bubble.lifetime = (0.1 + bubble.seed * 0.19) / speed;
+  bubble.age = warmStart ? Math.random() * bubble.lifetime : 0;
+  bubble.pos.copy(origin);
+  bubble.pos.x += (Math.random() - 0.5) * 0.018 * settings.scatterRadius;
   bubble.spawnY = bubble.pos.y;
   bubble.anchorX = bubble.pos.x;
   bubble.anchorY = bubble.pos.y;
-
-  const speed = 0.028 + Math.random() * 0.034 + settings.animationSpeed * 0.042;
-  bubble.vel.set((Math.random() - 0.5) * 0.006, speed);
+  bubble.vel.set((bubble.seed - 0.5) * 0.012, speed);
+  if (warmStart) {
+    bubble.pos.addScaledVector(bubble.vel, bubble.age);
+    bubble.pos.x += Math.sin(bubble.cyclePhase) * bubble.age * 0.008;
+  }
+  bubble.interaction = 0;
+  updateAquariumBubbleAppearance(bubble, 0);
 }
 
 function pickInteriorSpawnPoint(
@@ -3622,12 +3613,27 @@ function SdfBubbleLogo({
 }) {
   const texture = useSvgMaskTexture(svgText, settings.maskRoughness);
   const runningTime = useRef(0);
-  const spawnAccumulator = useRef(0);
+  const simulationAccumulator = useRef(0);
+  const aquariumEmitters = useRef<THREE.Vector2[]>([]);
+  const grabs = useRef(new Map<TrackedHand, { index: number; x: number; y: number; vx: number; vy: number }>());
+  const pointerInside = useRef(false);
+  const { gl } = useThree();
+
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const enter = () => { pointerInside.current = true; };
+    const leave = () => { pointerInside.current = false; };
+    canvas.addEventListener("pointermove", enter);
+    canvas.addEventListener("pointerleave", leave);
+    return () => {
+      canvas.removeEventListener("pointermove", enter);
+      canvas.removeEventListener("pointerleave", leave);
+    };
+  }, [gl]);
   const bubbles = useRef<SdfBubble[]>([]);
   const bounds = useRef({ minX: -0.7, maxX: 0.7, minY: -0.45, maxY: 0.45 });
   const maskSampler = useRef<SdfMaskSampler | null>(null);
   const spawnOrigins = useRef<THREE.Vector2[]>([]);
-  const materialRef = useRef<THREE.ShaderMaterial | null>(null);
   const simulationKey = useRef("");
 
   const layout = useMemo(() => {
@@ -3681,17 +3687,13 @@ function SdfBubbleLogo({
 
     const shaderMaterial = new THREE.ShaderMaterial({
       uniforms: {
-        uMask: { value: texture },
-        uTime: { value: 0 },
-        uReveal: { value: 1 },
+        uBubbleCount: { value: 0 },
         uFlicker: { value: settings.flicker },
-        uMouse: { value: new THREE.Vector2(0, 0) },
-        uDistortion: { value: new THREE.Vector2(0, 0) },
         uColorPrimary: { value: new THREE.Color(settings.particleColor) },
         uColorAccent: { value: new THREE.Color(settings.particleAccentColor) },
         uColorHighlight: { value: new THREE.Color(settings.particleHighlightColor) },
         uBubbles: {
-          value: Array.from({ length: SDF_BUBBLE_MAX }, () => new THREE.Vector3(0, 0, 0))
+          value: Array.from({ length: SDF_BUBBLE_MAX }, () => new THREE.Vector4(0, 0, 0, 0))
         }
       },
       vertexShader: sdfBubbleVertexShader,
@@ -3703,7 +3705,6 @@ function SdfBubbleLogo({
     });
 
     shaderMaterial.toneMapped = false;
-    materialRef.current = shaderMaterial;
     return shaderMaterial;
   }, [texture]);
 
@@ -3715,6 +3716,9 @@ function SdfBubbleLogo({
     const bubbleCount = getSdfActiveBubbleCount(settings.particleCount);
     const nextBubbles: SdfBubble[] = [];
     const activeMask = maskSampler.current;
+    aquariumEmitters.current = activeMask
+      ? createAquariumEmitters(spawnOrigins.current, activeMask)
+      : spawnOrigins.current;
 
     for (let index = 0; index < bubbleCount; index += 1) {
       const bubble = createSdfBubble(
@@ -3725,6 +3729,9 @@ function SdfBubbleLogo({
         settings,
         activeMask
       );
+      if (settings.sdfMotionMode === "aquarium" && bubble.role === "riser") {
+        resetAquariumBubble(bubble, aquariumEmitters.current, settings, true);
+      }
       nextBubbles.push(bubble);
     }
 
@@ -3738,6 +3745,10 @@ function SdfBubbleLogo({
         cycleRate: 1,
         cyclePhase: 0,
         spawnY: 0,
+        age: 0,
+        lifetime: 1,
+        opacity: 0,
+        interaction: 0,
         role: "riser",
         anchorX: 0,
         anchorY: 0
@@ -3745,7 +3756,9 @@ function SdfBubbleLogo({
     }
 
     bubbles.current = nextBubbles;
-    spawnAccumulator.current = 0;
+    simulationAccumulator.current = 0;
+    runningTime.current = 0;
+    grabs.current.clear();
   };
 
   useEffect(() => {
@@ -3766,235 +3779,220 @@ function SdfBubbleLogo({
   useEffect(() => {
     return () => {
       material?.dispose();
-      materialRef.current = null;
     };
   }, [material]);
 
   useFrame((state, delta) => {
-    if (!material || paused) {
-      return;
-    }
+    if (!material || paused || bubbles.current.length === 0) return;
 
-    runningTime.current += delta;
-    const time = runningTime.current;
-    const dt = Math.min(delta, 0.04);
-    const activeMask = maskSampler.current;
+    const frameDt = Math.min(delta, 0.05);
     const bubbleCount = getSdfActiveBubbleCount(settings.particleCount);
     const aquarium = settings.sdfMotionMode === "aquarium";
-    const flow = 0.1 + settings.turbulence * 0.72 + settings.animationSpeed * 0.24;
-    const spin = 1.2 + settings.animationSpeed * 2.0;
-    const attract = aquarium ? 0 : settings.attractRadius * 0.045;
-    const riseSpeed = 0.022 + settings.animationSpeed * 0.062;
-    const noise = 0.012 + settings.turbulence * 0.038;
-    const maxRiserSpeed = 0.36;
-    const maxBodySpeed = 0.06;
-    const mouseWorld = new THREE.Vector2(
-      state.pointer.x * state.viewport.width * 0.5,
-      state.pointer.y * state.viewport.height * 0.5
-    );
-    const mouseSdf = worldToSdfSpace(mouseWorld.x, mouseWorld.y);
-    const repelRadius = settings.repelRadius * (aquarium ? 0.16 : 0.22);
-    const repelStrength = settings.mouseForce * (aquarium ? 0.07 : 0.12);
+    const activeMask = maskSampler.current;
+    const handView = settings.handControl && handInput.active &&
+      handInput.width > 1 && handInput.height > 1 ? handInput : null;
+    const visibleHands = handView?.hands.filter((hand) => hand.active > 0.5) ?? [];
+    const sx = handView ? state.viewport.width / handView.width / SDF_PLANE_HALF : 0;
+    const sy = handView ? state.viewport.height / handView.height / SDF_PLANE_HALF : 0;
+    const toX = (x: number) => (x - (handView?.width ?? 0) * 0.5) * sx;
+    const toY = (y: number) => ((handView?.height ?? 0) * 0.5 - y) * sy;
+    const mouseX = state.pointer.x * state.viewport.width * 0.5 / SDF_PLANE_HALF;
+    const mouseY = state.pointer.y * state.viewport.height * 0.5 / SDF_PLANE_HALF;
 
-    spawnAccumulator.current += dt * (aquarium ? 2.4 + settings.animationSpeed * 2.2 : 1.1 + settings.animationSpeed * 1.2);
-
-    const steps = 5;
-    const subDt = dt / steps;
-
-    for (let step = 0; step < steps; step += 1) {
-      bubbles.current.forEach((bubble, index) => {
-        if (index >= bubbleCount || bubble.radius <= 0.0001) {
-          return;
+    // Own grabs in this scene so switching styles, replaying, or losing a hand
+    // cannot retain an index into a different particle simulation.
+    for (const [hand, grab] of grabs.current) {
+      if (!visibleHands.includes(hand) || hand.gesture !== "pinch" || grab.index >= bubbleCount) {
+        const bubble = bubbles.current[grab.index];
+        if (bubble) {
+          bubble.vel.set(grab.vx, grab.vy);
+          clampSdfBubbleSpeed(bubble, 0.7);
+          bubble.interaction = 1;
         }
+        grabs.current.delete(hand);
+      }
+    }
+    const heldIndices = new Set(Array.from(grabs.current.values(), (grab) => grab.index));
+    const forces: Array<{ gesture: HandGesture; x: number; y: number; active: number }> = [];
+    for (const hand of visibleHands) {
+      if (hand.gesture !== "pinch") {
+        forces.push({
+          gesture: hand.gesture,
+          x: toX(hand.gesture === "point" ? hand.tipX : hand.x),
+          y: toY(hand.gesture === "point" ? hand.tipY : hand.y),
+          active: hand.active
+        });
+        continue;
+      }
+      const x = toX(hand.pinchX);
+      const y = toY(hand.pinchY);
+      let grab = grabs.current.get(hand);
+      if (!grab) {
+        let best = -1;
+        let bestDistance = 0.12 ** 2;
+        for (let i = 0; i < bubbleCount; i += 1) {
+          const bubble = bubbles.current[i];
+          if (heldIndices.has(i) || bubble.opacity < 0.25) continue;
+          const distance = (bubble.pos.x - x) ** 2 + (bubble.pos.y - y) ** 2;
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            best = i;
+          }
+        }
+        if (best >= 0) {
+          grab = { index: best, x, y, vx: 0, vy: 0 };
+          grabs.current.set(hand, grab);
+          heldIndices.add(best);
+        }
+      }
+      if (grab) {
+        const smoothing = 1 - Math.exp(-12 * frameDt);
+        grab.vx += ((x - grab.x) / Math.max(frameDt, 0.001) - grab.vx) * smoothing;
+        grab.vy += ((y - grab.y) / Math.max(frameDt, 0.001) - grab.vy) * smoothing;
+        grab.x = x;
+        grab.y = y;
+      }
+    }
+    const grabbedBubbles = new Map(Array.from(grabs.current.values(), (grab) => [grab.index, grab]));
+
+    // A fixed simulation clock makes damping, collisions, and rise speed behave
+    // consistently at 30/60/120 Hz. Discard long background-tab gaps.
+    const stepDt = 1 / 120;
+    simulationAccumulator.current += frameDt;
+    while (simulationAccumulator.current >= stepDt) {
+      simulationAccumulator.current -= stepDt;
+      runningTime.current += stepDt;
+      const time = runningTime.current;
+      for (let index = 0; index < bubbleCount; index += 1) {
+        const bubble = bubbles.current[index];
+        const grab = grabbedBubbles.get(index);
+        if (grab) {
+          const follow = 1 - Math.exp(-20 * stepDt);
+          bubble.pos.x += (grab.x - bubble.pos.x) * follow;
+          bubble.pos.y += (grab.y - bubble.pos.y) * follow;
+          bubble.vel.set(grab.vx, grab.vy);
+          bubble.interaction = 1;
+          bubble.opacity = 1;
+          bubble.radius = bubble.baseRadius;
+          continue;
+        }
+
+        bubble.interaction *= Math.exp(-1.8 * stepDt);
+        let fx = 0;
+        let fy = 0;
+        let influence = 0;
+        for (const force of forces) {
+          const dx = bubble.pos.x - force.x;
+          const dy = bubble.pos.y - force.y;
+          const distance = Math.max(0.003, Math.hypot(dx, dy));
+          const reach = force.gesture === "fist" ? 0.5 : force.gesture === "point" ? 0.32 : 0.28;
+          const falloff = Math.max(0, 1 - distance / reach) * force.active;
+          if (falloff === 0) continue;
+          influence = Math.max(influence, Math.min(1, falloff * 3));
+          const strength = falloff * (0.6 + settings.mouseForce * 1.2);
+          if (force.gesture === "fist") {
+            fx -= dx / distance * strength;
+            fy -= dy / distance * strength;
+          } else if (force.gesture === "point") {
+            fx += (-dy - dx * 0.18) / distance * strength;
+            fy += (dx - dy * 0.18) / distance * strength;
+          } else {
+            fx += dx / distance * strength;
+            fy += dy / distance * strength;
+          }
+        }
+        if (visibleHands.length === 0 && pointerInside.current && settings.mouseForce > 0) {
+          const dx = bubble.pos.x - mouseX;
+          const dy = bubble.pos.y - mouseY;
+          const distance = Math.max(0.003, Math.hypot(dx, dy));
+          const reach = settings.repelRadius * 0.35;
+          const falloff = Math.max(0, 1 - distance / Math.max(0.001, reach));
+          fx += dx / distance * falloff * settings.mouseForce * 0.75;
+          fy += dy / distance * falloff * settings.mouseForce * 0.75;
+          influence = Math.max(influence, falloff);
+        }
+        bubble.interaction = Math.max(bubble.interaction, influence);
 
         if (aquarium) {
           if (bubble.role === "body") {
-            applySdfAquariumBodyMotion(bubble, time, settings.breathe, subDt);
+            applySdfAquariumBodyMotion(bubble, time, settings, stepDt);
           } else {
-            applySdfAquariumRise(bubble, time, riseSpeed, noise, spin, subDt);
+            applySdfAquariumRise(bubble, time, 0.025 + settings.animationSpeed * 0.055,
+              settings.turbulence, settings.scatterRadius, stepDt);
           }
         } else {
-          applySdfBubbleDrift(bubble, time, flow, spin, subDt);
+          applySdfBubbleDrift(bubble, time,
+            0.1 + settings.turbulence * 0.72 + settings.animationSpeed * 0.24,
+            1.2 + settings.animationSpeed * 2, stepDt);
+          const pull = settings.attractRadius * (bubble.satellite ? 0.16 : 0.1) *
+            (1 - bubble.interaction * 0.95);
+          bubble.vel.x += (bubble.anchorX - bubble.pos.x) * pull * stepDt;
+          bubble.vel.y += (bubble.anchorY - bubble.pos.y) * pull * stepDt;
         }
+        bubble.vel.x += fx * stepDt;
+        bubble.vel.y += fy * stepDt;
+        const damping = aquarium ? (bubble.role === "body" ? 4.5 : 0.15) : 2.4;
+        bubble.vel.multiplyScalar(Math.exp(-damping * stepDt));
+        const maxSpeed = bubble.interaction > 0.05 ? 0.7 :
+          aquarium ? (bubble.role === "body" ? 0.12 : 0.24) : SDF_MAX_BUBBLE_SPEED;
+        clampSdfBubbleSpeed(bubble, maxSpeed);
+        bubble.pos.addScaledVector(bubble.vel, stepDt);
 
-        if (attract > 0.0001) {
-          // Leash every puff to its own spawn anchor (they're sampled across the
-          // glyph), so the cloud holds the shape while boiling. NOTE: this used
-          // to index spawnOrigins with a fractional seed, which always fell back
-          // to origins[0] — every bubble was pulled to one corner.
-          const gain = bubble.satellite ? attract * 3.5 : attract;
-          const toAnchor = new THREE.Vector2(
-            bubble.anchorX - bubble.pos.x,
-            bubble.anchorY - bubble.pos.y
-          );
-          const anchorDistance = toAnchor.length();
-
-          if (anchorDistance > 0.0001) {
-            bubble.vel.addScaledVector(
-              toAnchor.normalize(),
-              gain * anchorDistance * subDt
-            );
-          }
-        }
-
-        const mouseDelta = new THREE.Vector2(bubble.pos.x - mouseSdf.x, bubble.pos.y - mouseSdf.y);
-        const mouseDistance = mouseDelta.length();
-
-        if (mouseDistance < repelRadius && mouseDistance > 0.0001) {
-          const push = (repelRadius - mouseDistance) * repelStrength;
-          bubble.vel.addScaledVector(mouseDelta.normalize(), push * subDt);
-        }
-
-        bubble.vel.multiplyScalar(aquarium ? (bubble.role === "body" ? 0.88 : 0.992) : 0.992);
-        clampSdfBubbleSpeed(
-          bubble,
-          aquarium ? (bubble.role === "body" ? maxBodySpeed : maxRiserSpeed) : SDF_MAX_BUBBLE_SPEED
-        );
-        bubble.pos.addScaledVector(bubble.vel, subDt);
-
-        if (aquarium) {
-          if (bubble.role === "body") {
-            bubble.radius =
-              bubble.baseRadius *
-              (1 +
-                Math.sin(time * bubble.cycleRate + bubble.cyclePhase) * settings.breathe * 0.08);
-          } else {
-            const riseT = getAquariumRiseT(
-              bubble.pos.y,
-              bubble.spawnY,
-              bounds.current.maxY
-            );
-            bubble.radius = getAquariumBubbleRadius(
-              bubble.baseRadius,
-              riseT,
-              time,
-              bubble.cycleRate,
-              bubble.cyclePhase
-            );
+        if (aquarium && bubble.role === "riser") {
+          // Freeze aging during a gesture so a gathered puff cannot teleport out
+          // of the user's hand. Recycling only happens after it is invisible.
+          bubble.age += stepDt * (1 - bubble.interaction);
+          updateAquariumBubbleAppearance(bubble, time);
+          if (bubble.age >= bubble.lifetime) {
+            resetAquariumBubble(bubble, aquariumEmitters.current, settings);
           }
         } else {
-          // 뭉게뭉게: puffs slowly swell and shrink so the cloud gently boils.
-          bubble.radius =
-            bubble.baseRadius *
-            (1 +
-              Math.sin(time * bubble.cycleRate + bubble.cyclePhase) *
-                (0.08 + settings.breathe * 0.6));
-        }
-
-        if (activeMask) {
-          if (!aquarium && bubble.satellite) {
-            // Stray dots roam across the silhouette freely — the anchor leash
-            // is what keeps them hovering around it.
-          } else if (!aquarium || bubble.role === "body") {
-            resolveSdfBubbleWallCollision(bubble, activeMask, aquarium ? 0.5 : 0.58);
-            resolveSdfBubbleWallCollision(bubble, activeMask, aquarium ? 0.34 : 0.42);
-          } else {
-            resolveSdfBubbleWallCollision(bubble, activeMask, 0.22);
-          }
-          clampSdfBubbleSpeed(
-            bubble,
-            aquarium ? (bubble.role === "body" ? maxBodySpeed : maxRiserSpeed) : SDF_MAX_BUBBLE_SPEED
-          );
-
-          if (aquarium && bubble.role === "riser") {
-            const riseT = getAquariumRiseT(
-              bubble.pos.y,
-              bubble.spawnY,
-              bounds.current.maxY
-            );
-            const reachedTop =
-              riseT > 0.94 ||
-              bubble.pos.y > bounds.current.maxY - bubble.radius * 0.12;
-            const driftedOut =
-              riseT > 0.72 &&
-              activeMask.clearance(bubble.pos.x, bubble.pos.y) < 0.0012;
-
-            if (reachedTop || driftedOut) {
-              resetAquariumBubble(
-                bubble,
-                spawnOrigins.current,
-                bounds.current,
-                settings,
-                activeMask
-              );
+          const pulse = Math.sin(time * bubble.cycleRate + bubble.cyclePhase);
+          const roll = Math.sin(time * (0.7 + settings.animationSpeed) - bubble.anchorY * 9);
+          bubble.radius = bubble.baseRadius * (1 + pulse * (0.08 + settings.breathe * 0.6) +
+            (aquarium ? roll * 0.08 : 0));
+          bubble.opacity = 1;
+          // Aquarium uses soft anchors to preserve the glyph while round lobes
+          // move across its edge. Detached risers have no glyph wall at all.
+          if (!aquarium && !bubble.satellite && activeMask && bubble.interaction < 0.05) {
+            if (activeMask.sample(bubble.pos.x, bubble.pos.y) < 0.3) {
+              const home = 1 - Math.exp(-4 * stepDt);
+              bubble.pos.x += (bubble.anchorX - bubble.pos.x) * home;
+              bubble.pos.y += (bubble.anchorY - bubble.pos.y) * home;
+            } else {
+              resolveSdfBubbleWallCollision(bubble, activeMask, 0.3);
             }
           }
         }
-      });
+      }
 
       for (let i = 0; i < bubbleCount; i += 1) {
+        const a = bubbles.current[i];
+        if (grabbedBubbles.has(i) || a.opacity < 0.1 || a.interaction > 0.35) continue;
         for (let j = i + 1; j < bubbleCount; j += 1) {
-          const a = bubbles.current[i];
           const b = bubbles.current[j];
-
-          if (aquarium && a.role !== b.role) {
-            continue;
-          }
-
-          resolveSdfSphereCollision(
-            a,
-            b,
-            aquarium ? (a.role === "riser" ? 0.32 : 0.52) : 0.16,
-            aquarium ? 0.38 : 0.3
-          );
+          if (grabbedBubbles.has(j) || b.opacity < 0.1 || b.interaction > 0.35) continue;
+          if (aquarium && a.role !== b.role) continue;
+          resolveSdfSphereCollision(a, b,
+            aquarium ? (a.role === "body" ? 0.68 : 0.9) : 0.6, 0.15);
         }
       }
     }
 
-    while (spawnAccumulator.current >= 1 && activeMask && aquarium) {
-      spawnAccumulator.current -= 1;
-      const riserIndices: number[] = [];
-      bubbles.current.forEach((bubble, index) => {
-        if (index < bubbleCount && bubble.role === "riser") {
-          riserIndices.push(index);
-        }
-      });
-
-      if (riserIndices.length === 0) {
-        continue;
-      }
-
-      const targetIndex = riserIndices[Math.floor(Math.random() * riserIndices.length)];
-      const bubble = bubbles.current[targetIndex];
-      const spawned = createSdfBubble(
-        targetIndex,
-        bubbleCount,
-        spawnOrigins.current,
-        bounds.current,
-        settings,
-        activeMask
+    const uniforms = material.uniforms.uBubbles.value as THREE.Vector4[];
+    for (let index = 0; index < bubbleCount; index += 1) {
+      const bubble = bubbles.current[index];
+      // Also fade before reaching the drawing plane so throws never cut off hard.
+      const edgeFade = 1 - THREE.MathUtils.smoothstep(
+        Math.max(Math.abs(bubble.pos.x), Math.abs(bubble.pos.y)), 0.86, 0.98
       );
-      bubble.pos.copy(spawned.pos);
-      bubble.vel.copy(spawned.vel);
-      bubble.radius = spawned.radius;
-      bubble.baseRadius = spawned.baseRadius;
-      bubble.seed = spawned.seed;
-      bubble.cycleRate = spawned.cycleRate;
-      bubble.cyclePhase = spawned.cyclePhase;
-      bubble.spawnY = spawned.spawnY;
-      bubble.role = spawned.role;
-      bubble.anchorX = spawned.anchorX;
-      bubble.anchorY = spawned.anchorY;
+      uniforms[index].set(bubble.pos.x, bubble.pos.y, bubble.radius, bubble.opacity * edgeFade);
     }
-
-    const bubbleUniforms = material.uniforms.uBubbles.value as THREE.Vector3[];
-    bubbles.current.forEach((bubble, index) => {
-      if (index < bubbleCount) {
-        bubbleUniforms[index].set(bubble.pos.x, bubble.pos.y, Math.max(0, bubble.radius));
-      } else {
-        bubbleUniforms[index].set(0, 0, 0);
-      }
-    });
-
-    material.uniforms.uTime.value = time;
-    material.uniforms.uReveal.value = 1;
+    material.uniforms.uBubbleCount.value = bubbleCount;
     material.uniforms.uFlicker.value = settings.flicker;
-    material.uniforms.uMouse.value.copy(mouseSdf);
-    material.uniforms.uDistortion.value.set(0, 0);
     material.uniforms.uColorPrimary.value.set(settings.particleColor);
     material.uniforms.uColorAccent.value.set(settings.particleAccentColor);
     material.uniforms.uColorHighlight.value.set(settings.particleHighlightColor);
-    material.uniformsNeedUpdate = true;
   });
 
   if (!material) {
@@ -4021,7 +4019,7 @@ function createSdfBubble(
   mask: SdfMaskSampler | null
 ): SdfBubble {
   const aquarium = settings.sdfMotionMode === "aquarium";
-  const sizeScale = 0.46 + settings.pointSize * 0.062;
+  const sizeScale = (0.46 + settings.pointSize * 0.062) * Math.sqrt(274 / activeBubbleCount);
   const bodyCount = aquarium ? getSdfAquariumBodyCount(activeBubbleCount) : 0;
   const isBody = aquarium && index < bodyCount;
   const role: SdfBubbleRole = isBody ? "body" : "riser";
@@ -4044,7 +4042,7 @@ function createSdfBubble(
         (Math.random() - 0.5) * 0.0012
       );
     } else {
-      pos = pickAquariumRiserSpawn(origins, mask, box);
+      pos = (origins[index % Math.max(1, origins.length)] ?? new THREE.Vector2()).clone();
       const speed = 0.026 + Math.random() * 0.032 + settings.animationSpeed * 0.04;
       vel = new THREE.Vector2((Math.random() - 0.5) * 0.005, speed);
     }
@@ -4086,6 +4084,10 @@ function createSdfBubble(
     cycleRate: cycle.cycleRate,
     cyclePhase: cycle.cyclePhase,
     spawnY: pos.y,
+    age: 0,
+    lifetime: 1,
+    opacity: 1,
+    interaction: 0,
     role: aquarium ? role : "riser",
     anchorX: pos.x,
     anchorY: pos.y,
@@ -4102,7 +4104,7 @@ function resolveSdfSphereCollision(
   const dx = a.pos.x - b.pos.x;
   const dy = a.pos.y - b.pos.y;
   const distSq = dx * dx + dy * dy;
-  const radiusSum = a.radius + b.radius;
+  const radiusSum = (a.radius + b.radius) * separation;
 
   if (distSq >= radiusSum * radiusSum || distSq <= 0.000001) {
     return;
@@ -4112,7 +4114,7 @@ function resolveSdfSphereCollision(
   const overlap = radiusSum - dist;
   const nx = dx / dist;
   const ny = dy / dist;
-  const push = overlap * separation;
+  const push = overlap * 0.5;
 
   a.pos.x += nx * push;
   a.pos.y += ny * push;

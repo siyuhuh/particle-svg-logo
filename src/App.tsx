@@ -411,6 +411,7 @@ const EFFECT_SETTING_PRESETS: Record<LogoStyle, EffectSettings> = {
   },
   sdf: {
     ...BASE_EFFECT_SETTINGS,
+    sdfMotionMode: "aquarium",
     particleColor: "#ffffff",
     particleAccentColor: "#eef6ff",
     particleHighlightColor: "#ffffff",
@@ -2986,8 +2987,8 @@ export default function App() {
                   <strong>Motion</strong>
                   <small>
                     {settings.sdfMotionMode === "aquarium"
-                      ? "Bubbles rise and shrink like soda carbonation"
-                      : "Free drift with collisions inside the logo"}
+                      ? "Soft puffs billow, lift away, and dissolve"
+                      : "Round puffs drift and gather around the logo"}
                   </small>
                 </span>
                 <select
@@ -3026,7 +3027,7 @@ export default function App() {
                 onChange={(value) => updateSetting("turbulence", value)}
               />
               <SliderControl
-                label="Spawn spread"
+                label={settings.sdfMotionMode === "aquarium" ? "Rise spread" : "Spawn spread"}
                 value={settings.scatterRadius}
                 min={0.1}
                 max={2}
