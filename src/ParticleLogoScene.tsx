@@ -3086,20 +3086,24 @@ const sdfBubbleFragmentShader = `
       float bubbleRadius = uBubbles[j].z;
       if (bubbleRadius >= 0.0005) {
         float bubble = length(p - uBubbles[j].xy) - bubbleRadius;
-        d = smin(d, bubble, 0.013);
+        d = smin(d, bubble, 0.024);
       }
     }
 
     return d;
   }
 
+  // Dome normal: the 2D SDF gradient tilts the rim outward while the interior
+  // rises toward the viewer like a droplet — this is what sells "liquid blob"
+  // instead of a flat stencil.
   vec3 sceneNormal(vec2 p, float d) {
-    vec2 e = vec2(0.0014, 0.0);
-    return normalize(vec3(
-      sceneDist(p + e.xy) - d,
-      sceneDist(p + e.yx) - d,
-      0.1
-    ));
+    vec2 e = vec2(0.0016, 0.0);
+    float gx = sceneDist(p + e.xy) - d;
+    float gy = sceneDist(p + e.yx) - d;
+    vec2 grad = vec2(gx, gy) / e.x;
+    float h = clamp(-d / 0.02, 0.0, 1.0);
+    float dome = sqrt(h * (2.0 - h));
+    return normalize(vec3(grad * (1.0 - dome), mix(0.18, 1.7, dome)));
   }
 
   void main() {
@@ -3113,17 +3117,21 @@ const sdfBubbleFragmentShader = `
     vec3 color = vec3(0.0);
 
     if (alpha > 0.001) {
+      float h = clamp(-d / 0.02, 0.0, 1.0);
       vec3 normal = sceneNormal(uv, d);
-      vec3 lightDir = normalize(vec3(-0.38, 0.82, 0.94));
+      vec3 lightDir = normalize(vec3(-0.42, 0.78, 0.62));
       float diffuse = max(dot(normal, lightDir), 0.0);
       vec3 viewDir = vec3(0.0, 0.0, 1.0);
-      float spec = pow(max(dot(reflect(-lightDir, normal), viewDir), 0.0), 30.0);
-      float rim = pow(1.0 - clamp(normal.z, 0.0, 1.0), 2.2);
+      float spec = pow(max(dot(reflect(-lightDir, normal), viewDir), 0.0), 46.0);
+      float rim = pow(1.0 - clamp(normal.z, 0.0, 1.0), 1.6);
       float grain = (fract(sin(dot(uv * 180.0, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) * uFlicker * 0.04;
 
-      color = uColorPrimary * (0.18 + diffuse * 0.82);
-      color = mix(color, uColorAccent, diffuse * 0.24);
-      color += uColorHighlight * (spec * 0.42 + rim * 0.2);
+      // Darker meniscus at the rim, airy centre → reads as depth, not a stencil.
+      vec3 deep = uColorAccent * 0.5;
+      color = mix(deep, uColorPrimary, 0.3 + h * 0.7);
+      color *= 0.52 + diffuse * 0.55;
+      color += uColorHighlight * spec * 1.0;
+      color += uColorHighlight * rim * 0.34;
       color -= vec3(grain);
     }
 
@@ -3449,10 +3457,10 @@ function applySdfAquariumBodyMotion(
 
 function createAquariumBaseRadius(sizeScale: number, role: SdfBubbleRole) {
   if (role === "body") {
-    return (0.0088 + Math.random() * 0.0095) * sizeScale;
+    return (0.013 + Math.random() * 0.012) * sizeScale;
   }
 
-  return (0.0022 + Math.random() * 0.0034) * sizeScale;
+  return (0.0032 + Math.random() * 0.0044) * sizeScale;
 }
 
 function getSdfAquariumBodyCount(total: number) {
@@ -4021,7 +4029,7 @@ function createSdfBubble(
   const role: SdfBubbleRole = isBody ? "body" : "riser";
   const baseRadius = aquarium
     ? createAquariumBaseRadius(sizeScale, role)
-    : (0.0038 + Math.random() * 0.0052) * sizeScale;
+    : (0.0095 + Math.random() * 0.0105) * sizeScale;
   let pos: THREE.Vector2;
   let vel: THREE.Vector2;
 
