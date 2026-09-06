@@ -2982,6 +2982,29 @@ export default function App() {
             </>
           ) : settings.logoStyle === "sdf" ? (
             <>
+              <div className={`sdf-hand-control${settings.handControl ? " is-active" : ""}`}>
+                <div className="sdf-hand-control-header">
+                  <strong><Hand size={15} /> Camera interaction</strong>
+                  <button
+                    type="button"
+                    aria-pressed={settings.handControl}
+                    onClick={() => updateSetting("handControl", !settings.handControl)}
+                  >
+                    {settings.handControl ? "Disable camera" : "Enable camera"}
+                  </button>
+                </div>
+                <p>
+                  {settings.handControl
+                    ? "Move either hand through the puffs in your camera view."
+                    : "See yourself behind the puffs and move them with your hands."}
+                </p>
+                <dl className="sdf-gesture-guide">
+                  <div><dt>Open palm</dt><dd>Push apart</dd></div>
+                  <div><dt>Fist</dt><dd>Gather</dd></div>
+                  <div><dt>Pinch</dt><dd>Lift & release</dd></div>
+                  <div><dt>Point</dt><dd>Swirl</dd></div>
+                </dl>
+              </div>
               <label className="variant-select-row">
                 <span>
                   <strong>Motion</strong>
@@ -3248,7 +3271,7 @@ export default function App() {
               Grid
             </label>
 
-            {settings.logoStyle !== "walkers" && (
+            {settings.logoStyle !== "walkers" && settings.logoStyle !== "sdf" && (
               <label className="toggle-row">
                 <input
                   type="checkbox"

@@ -38,8 +38,6 @@ type Walker = {
   fall: number;
   /** True this frame while dangling from a pinch — drawn last, with a sway. */
   held: boolean;
-  /** >0 while bowled over by a fast sweep — lies flat, then gets back up. */
-  down: number;
   /** >0 while stopped for a chance chat with a passing neighbour. */
   chat: number;
   /** Which way to face while chatting (toward the partner). */
@@ -304,7 +302,6 @@ export function WebcamWalkersOverlay({
         heat: old ? old.heat : 0,
         fall: old ? old.fall : 0,
         held: false,
-        down: old ? old.down : 0,
         chat: 0,
         chatDir: old ? old.chatDir : 1
       };
@@ -585,12 +582,12 @@ export function WebcamWalkersOverlay({
         for (let attempt = 0; attempt < 5; attempt += 1) {
           const i = (Math.random() * walkers.length) | 0;
           const a = walkers[i];
-          if (!a || a.chat > 0 || a.disp > 0.5 || a.down > 0 || a.fall > 0) continue;
+          if (!a || a.chat > 0 || a.disp > 0.5 || a.fall > 0) continue;
           if (Math.hypot(a.vx, a.vy) < 0.25) continue;
           const jEnd = Math.min(walkers.length, i + 34);
           for (let j = i + 1; j < jEnd; j += 1) {
             const b = walkers[j];
-            if (b.chat > 0 || b.disp > 0.5 || b.down > 0 || b.fall > 0) continue;
+            if (b.chat > 0 || b.disp > 0.5 || b.fall > 0) continue;
             const dd = (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
             if (dd > maxD2) continue;
             if (Math.random() < 0.18) {
@@ -655,17 +652,6 @@ export function WebcamWalkersOverlay({
             }
             wkr.heat += (0.6 - wkr.heat) * clamp(0.12 * dt, 0, 1);
             wkr.phase = (wkr.phase + 0.5 * dt) % twoPi;
-            continue;
-          }
-
-          // Bowled over by a hard sweep: lie flat for a beat, then get back up.
-          if (wkr.down > 0) {
-            wkr.down = Math.max(0, wkr.down - dt / 95);
-            wkr.vx *= pileDamping;
-            wkr.vy *= pileDamping;
-            wkr.x += wkr.vx * dt;
-            wkr.y += wkr.vy * dt;
-            wkr.heat += (0.75 - wkr.heat) * clamp(0.2 * dt, 0, 1);
             continue;
           }
 
@@ -760,13 +746,6 @@ export function WebcamWalkersOverlay({
             wkr.chat = 0;
             if (pushMark > 0.1) {
               wkr.disp = 1;
-            }
-            // A hard, fast sweep can bowl someone over — they tumble, lie a
-            // beat, then pick themselves up (down branch above).
-            if (pushMark > 0.42 && Math.random() < 0.03 * dt) {
-              wkr.down = 1;
-              wkr.vx *= 1.5;
-              wkr.vy *= 1.5;
             }
             heatTarget = clamp(pushInfl * 1.5, 0, 1);
           } else if (followTo) {
@@ -940,22 +919,13 @@ export function WebcamWalkersOverlay({
         const sx = f * SPRITE_CELL;
         const heatStep = clamp(Math.round(wkr.heat * (PALETTE_STEPS - 1)), 0, PALETTE_STEPS - 1);
         const sy = (heatStep * GENDERS + wkr.gender) * SPRITE_CELL;
-        if (wkr.held || wkr.fall > 0 || wkr.down > 0) {
-          // Dangling from a pinch: a pendulum sway. Tumbling after a drop: a
-          // roll. Bowled over: tip flat fast, lie, then tilt back up at the end.
+        if (wkr.held || wkr.fall > 0) {
+          // A held walker sways; a released walker briefly tumbles.
           ctx.save();
           ctx.translate(wkr.x, wkr.y);
-          let tilt: number;
-          if (wkr.held) {
-            tilt = Math.sin(now * 0.004 + wkr.wSeed) * 0.28;
-          } else if (wkr.fall > 0) {
-            tilt = (1 - wkr.fall) * 1.3 * wkr.face;
-          } else {
-            tilt =
-              wkr.face *
-              1.5 *
-              clamp(Math.min((1 - wkr.down) * 5, wkr.down * 5), 0, 1);
-          }
+          const tilt = wkr.held
+            ? Math.sin(now * 0.004 + wkr.wSeed) * 0.28
+            : (1 - wkr.fall) * 1.3 * wkr.face;
           ctx.rotate(tilt);
           if (wkr.face < 0) {
             ctx.scale(-1, 1);

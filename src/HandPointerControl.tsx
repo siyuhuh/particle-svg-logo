@@ -4,6 +4,12 @@ import { handInput } from "./handInput";
 
 // A pointerId no real device will use, so hand-driven events are distinguishable.
 const VIRTUAL_POINTER_ID = 0x7ab;
+const HAND_ACTION_LABELS = {
+  open: "Push",
+  fist: "Gather",
+  pinch: "Lift",
+  point: "Swirl"
+};
 
 // Webcam hand → virtual pointer for every non-walkers style. The primary hand's
 // palm becomes the cursor; each frame we synthesize a PointerEvent at the topmost
@@ -14,21 +20,24 @@ const VIRTUAL_POINTER_ID = 0x7ab;
 // that implement native gesture forces (e.g. the SDF bubbles).
 export function HandPointerControl({
   hint,
-  nativeGestures = false
+  nativeGestures = false,
+  cameraPresentation = "preview"
 }: {
   hint?: string;
   nativeGestures?: boolean;
+  cameraPresentation?: "preview" | "background";
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const cursorRef = useRef<HTMLDivElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
+  const cameraBackground = cameraPresentation === "background";
 
   const { handsRef, status, modelReady, videoRef } = useHandTracking({
     enabled: true,
     viewRef: wrapRef
   });
 
-  // PiP: adopt the tracker's <video> so you can see what the camera sees.
+  // Reuse the tracker's video for both presentations, keeping one camera stream.
   useEffect(() => {
     const holder = previewRef.current;
     const video = videoRef.current;
@@ -41,7 +50,7 @@ export function HandPointerControl({
         holder.removeChild(video);
       }
     };
-  }, [status, videoRef]);
+  }, [status, videoRef, cameraPresentation]);
 
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -146,11 +155,15 @@ export function HandPointerControl({
         const y = nativeGestures
           ? hand.gesture === "pinch" ? hand.pinchY : hand.gesture === "point" ? hand.tipY : hand.y
           : hand.y;
+        const cursorScale = !nativeGestures && pressed ? 0.68 : 1;
         cursor.style.opacity = "1";
-        cursor.style.transform = `translate(${x}px, ${y}px) translate(-50%, -50%) scale(${
-          pressed ? 0.68 : 1
-        })`;
+        cursor.style.transform = `translate(${x}px, ${y}px) translate(-50%, -50%) scale(${cursorScale})`;
         cursor.classList.toggle("is-pressed", pressed);
+        if (nativeGestures) {
+          cursor.dataset.action = HAND_ACTION_LABELS[hand.gesture];
+        } else {
+          delete cursor.dataset.action;
+        }
       }
     };
 
@@ -168,20 +181,31 @@ export function HandPointerControl({
   }, [handsRef, nativeGestures]);
 
   return (
-    <div ref={wrapRef} className="hand-pointer-overlay" aria-hidden="true">
-      <div ref={cursorRef} className="hand-pointer-cursor" />
-      <div ref={previewRef} className="hand-pointer-preview" />
-      <div className={`hand-pointer-status status-${status}`} role="status">
-        {status === "idle" && "Hand control · starting…"}
-        {status === "requesting" && "Hand control · requesting camera…"}
-        {status === "active" &&
-          (modelReady
-            ? hint ?? "Hand control · move a hand · pinch or fist to press"
-            : "Hand control · loading hand tracker…")}
-        {status === "denied" && "Hand control · camera denied"}
-        {status === "unsupported" && "Hand control needs HTTPS or localhost"}
-        {status === "error" && "Hand control · camera unavailable"}
+    <>
+      {cameraBackground && (
+        <div
+          ref={previewRef}
+          className={`hand-camera-background${status === "active" ? " is-active" : ""}`}
+          aria-hidden="true"
+        />
+      )}
+      <div ref={wrapRef} className="hand-pointer-overlay">
+        <div ref={cursorRef} className="hand-pointer-cursor" aria-hidden="true" />
+        {!cameraBackground && (
+          <div ref={previewRef} className="hand-pointer-preview" aria-hidden="true" />
+        )}
+        <div className={`hand-pointer-status status-${status}`} role="status">
+          {status === "idle" && "Hand control · starting…"}
+          {status === "requesting" && "Hand control · requesting camera…"}
+          {status === "active" &&
+            (modelReady
+              ? hint ?? "Hand control · move a hand · pinch or fist to press"
+              : "Hand control · loading hand tracker…")}
+          {status === "denied" && "Hand control · camera denied"}
+          {status === "unsupported" && "Hand control needs HTTPS or localhost"}
+          {status === "error" && "Hand control · camera unavailable"}
+        </div>
       </div>
-    </div>
+    </>
   );
 }

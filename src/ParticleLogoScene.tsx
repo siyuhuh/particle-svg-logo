@@ -1951,10 +1951,11 @@ export function ParticleLogoScene({
     <div
       className={`scene-wrap scene-style-${settings.logoStyle} ${
         settings.gridVisible ? "with-grid" : ""
-      }`}
+      } ${sdfStyle && settings.handControl ? "with-camera" : ""}`}
     >
       <Canvas
         shadows
+        style={sdfStyle && settings.handControl ? { zIndex: 1 } : undefined}
         camera={{ position: [0, 0, 6.2], fov: 44, near: 0.1, far: 40 }}
         dpr={[1, 2]}
         gl={{
@@ -2048,6 +2049,7 @@ export function ParticleLogoScene({
       {!walkersStyle && settings.handControl && (
         <HandPointerControl
           nativeGestures={sdfStyle}
+          cameraPresentation={sdfStyle ? "background" : "preview"}
           hint={sdfStyle ? "Open palm · push   /   Fist · gather   /   Pinch · lift   /   Point · swirl" : undefined}
         />
       )}
@@ -2063,12 +2065,16 @@ export function ParticleLogoScene({
   );
 }
 
+function getResponsiveLogoScale(width: number, height: number) {
+  return Math.min(
+    1,
+    Math.max(0.56, Math.min(width / 5.6, height / 5.0))
+  );
+}
+
 function ResponsiveLogoScale({ children }: { children: ReactNode }) {
   const viewport = useThree((state) => state.viewport);
-  const scale = Math.min(
-    1,
-    Math.max(0.56, Math.min(viewport.width / 5.6, viewport.height / 5.0))
-  );
+  const scale = getResponsiveLogoScale(viewport.width, viewport.height);
 
   return <group scale={scale}>{children}</group>;
 }
@@ -3345,36 +3351,34 @@ function createAquariumEmitters(origins: THREE.Vector2[], mask: SdfMaskSampler) 
   return emitters.length > 0 ? emitters : origins;
 }
 
-function pickAquariumBodySpawn(
+function createSdfBodyAnchors(
   origins: THREE.Vector2[],
-  mask: SdfMaskSampler,
-  box: { minX: number; maxX: number; minY: number; maxY: number },
-  index: number,
-  total: number
+  total: number,
+  mask: SdfMaskSampler | null
 ) {
-  const stride = Math.max(1, Math.floor(origins.length / Math.max(total, 1)));
-  const origin = origins[Math.min(origins.length - 1, index * stride)] ?? new THREE.Vector2();
+  const interior = mask ? origins.filter((point) => mask.sample(point.x, point.y) > 0.3) : origins;
+  const candidates = interior.length > 0 ? interior : origins;
+  if (candidates.length === 0) return [];
 
-  for (let attempt = 0; attempt < 24; attempt += 1) {
-    const candidate = new THREE.Vector2(
-      THREE.MathUtils.clamp(
-        origin.x + (Math.random() - 0.5) * 0.014,
-        box.minX,
-        box.maxX
-      ),
-      THREE.MathUtils.clamp(
-        origin.y + (Math.random() - 0.5) * 0.012,
-        box.minY,
-        box.maxY
-      )
-    );
-
-    if (mask.clearance(candidate.x, candidate.y) > 0.003 && mask.sample(candidate.x, candidate.y) > 0.3) {
-      return candidate;
+  // Farthest-point sampling fills the largest uncovered region each time. Thin
+  // strokes and disconnected islands receive anchors instead of random gaps.
+  const nearest = new Float32Array(candidates.length).fill(Infinity);
+  const anchors: THREE.Vector2[] = [];
+  let next = 0;
+  for (let index = 0; index < Math.min(total, candidates.length); index += 1) {
+    const anchor = candidates[next];
+    anchors.push(anchor.clone());
+    let farthest = -1;
+    for (let candidate = 0; candidate < candidates.length; candidate += 1) {
+      nearest[candidate] = Math.min(nearest[candidate], anchor.distanceToSquared(candidates[candidate]));
+      if (nearest[candidate] > farthest) {
+        farthest = nearest[candidate];
+        next = candidate;
+      }
     }
+    if (farthest < 1e-10) break;
   }
-
-  return origin.clone();
+  return anchors;
 }
 
 function sdfSeedFraction(seed: number) {
@@ -3418,7 +3422,7 @@ function applySdfAquariumBodyMotion(
   dt: number
 ) {
   const phase = bubble.cyclePhase;
-  const amount = 0.006 + settings.turbulence * 0.014;
+  const amount = Math.min(0.006 + settings.turbulence * 0.014, bubble.baseRadius * 0.45);
   const wave = time * (0.5 + settings.animationSpeed) - bubble.anchorY * 7;
   const targetX = bubble.anchorX + Math.sin(wave + bubble.anchorX * 5) * amount +
     Math.sin(time * bubble.cycleRate + phase) * amount * 0.45;
@@ -3431,14 +3435,14 @@ function applySdfAquariumBodyMotion(
 function createAquariumBaseRadius(sizeScale: number, role: SdfBubbleRole) {
   const size = Math.random();
   if (role === "body") {
-    return (0.023 + Math.pow(size, 0.7) * 0.026) * sizeScale;
+    return (0.028 + Math.pow(size, 0.7) * 0.018) * sizeScale;
   }
   // Mostly visible round puffs, with a few tiny crumbs and larger drifting lobes.
   return (0.006 + Math.pow(size, 1.6) * 0.024) * sizeScale;
 }
 
 function getSdfAquariumBodyCount(total: number) {
-  return Math.round(total * 0.68);
+  return Math.round(total * 0.8);
 }
 
 function updateAquariumBubbleAppearance(bubble: SdfBubble, time: number) {
@@ -3705,6 +3709,9 @@ function SdfBubbleLogo({
     aquariumEmitters.current = activeMask
       ? createAquariumEmitters(spawnOrigins.current, activeMask)
       : spawnOrigins.current;
+    const bodyAnchors = settings.sdfMotionMode === "aquarium"
+      ? createSdfBodyAnchors(spawnOrigins.current, getSdfAquariumBodyCount(bubbleCount), activeMask)
+      : [];
 
     for (let index = 0; index < bubbleCount; index += 1) {
       const bubble = createSdfBubble(
@@ -3713,7 +3720,8 @@ function SdfBubbleLogo({
         spawnOrigins.current,
         bounds.current,
         settings,
-        activeMask
+        activeMask,
+        bodyAnchors[index]
       );
       if (settings.sdfMotionMode === "aquarium" && bubble.role === "riser") {
         resetAquariumBubble(bubble, aquariumEmitters.current, settings, true);
@@ -3778,12 +3786,14 @@ function SdfBubbleLogo({
     const handView = settings.handControl && handInput.active &&
       handInput.width > 1 && handInput.height > 1 ? handInput : null;
     const visibleHands = handView?.hands.filter((hand) => hand.active > 0.5) ?? [];
-    const sx = handView ? state.viewport.width / handView.width / SDF_PLANE_HALF : 0;
-    const sy = handView ? state.viewport.height / handView.height / SDF_PLANE_HALF : 0;
+    const logoScale = getResponsiveLogoScale(state.viewport.width, state.viewport.height);
+    const worldToLocal = 1 / (SDF_PLANE_HALF * logoScale);
+    const sx = handView ? state.viewport.width / handView.width * worldToLocal : 0;
+    const sy = handView ? state.viewport.height / handView.height * worldToLocal : 0;
     const toX = (x: number) => (x - (handView?.width ?? 0) * 0.5) * sx;
     const toY = (y: number) => ((handView?.height ?? 0) * 0.5 - y) * sy;
-    const mouseX = state.pointer.x * state.viewport.width * 0.5 / SDF_PLANE_HALF;
-    const mouseY = state.pointer.y * state.viewport.height * 0.5 / SDF_PLANE_HALF;
+    const mouseX = state.pointer.x * state.viewport.width * 0.5 * worldToLocal;
+    const mouseY = state.pointer.y * state.viewport.height * 0.5 * worldToLocal;
 
     // Own grabs in this scene so switching styles, replaying, or losing a hand
     // cannot retain an index into a different particle simulation.
@@ -4004,7 +4014,8 @@ function createSdfBubble(
   origins: THREE.Vector2[],
   box: { minX: number; maxX: number; minY: number; maxY: number },
   settings: ParticleSettings,
-  mask: SdfMaskSampler | null
+  mask: SdfMaskSampler | null,
+  bodyAnchor?: THREE.Vector2
 ): SdfBubble {
   const aquarium = settings.sdfMotionMode === "aquarium";
   const sizeScale = getSdfBubbleSizeScale(settings.pointSize, activeBubbleCount);
@@ -4024,7 +4035,7 @@ function createSdfBubble(
 
   if (aquarium && mask) {
     if (isBody) {
-      pos = pickAquariumBodySpawn(origins, mask, box, index, bodyCount);
+      pos = (bodyAnchor ?? origins[index % Math.max(1, origins.length)] ?? new THREE.Vector2()).clone();
       vel = new THREE.Vector2(
         (Math.random() - 0.5) * 0.0012,
         (Math.random() - 0.5) * 0.0012
