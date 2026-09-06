@@ -3086,52 +3086,33 @@ const sdfBubbleFragmentShader = `
       float bubbleRadius = uBubbles[j].z;
       if (bubbleRadius >= 0.0005) {
         float bubble = length(p - uBubbles[j].xy) - bubbleRadius;
-        d = smin(d, bubble, 0.024);
+        d = smin(d, bubble, 0.015);
       }
     }
 
     return d;
   }
 
-  // Dome normal: the 2D SDF gradient tilts the rim outward while the interior
-  // rises toward the viewer like a droplet — this is what sells "liquid blob"
-  // instead of a flat stencil.
-  vec3 sceneNormal(vec2 p, float d) {
-    vec2 e = vec2(0.0016, 0.0);
-    float gx = sceneDist(p + e.xy) - d;
-    float gy = sceneDist(p + e.yx) - d;
-    vec2 grad = vec2(gx, gy) / e.x;
-    float h = clamp(-d / 0.02, 0.0, 1.0);
-    float dome = sqrt(h * (2.0 - h));
-    return normalize(vec3(grad * (1.0 - dome), mix(0.18, 1.7, dome)));
-  }
-
   void main() {
     vec2 uv = (vUv - 0.5) * 2.0;
-    float logoMask = texture2D(uMask, vUv).r;
 
     float d = sceneDist(uv);
-    float body = smoothstep(0.0016, -0.0016, d);
-    float alpha = body * smoothstep(0.03, 0.14, logoMask);
+    // Cotton, not glass: a wide fuzzy falloff instead of a crisp waterline, and
+    // NO mask clip — the silhouette is whatever the puffs bulge into, with stray
+    // satellite dots drifting free around it.
+    float alpha = smoothstep(0.0045, -0.0085, d);
 
     vec3 color = vec3(0.0);
 
-    if (alpha > 0.001) {
-      float h = clamp(-d / 0.02, 0.0, 1.0);
-      vec3 normal = sceneNormal(uv, d);
-      vec3 lightDir = normalize(vec3(-0.42, 0.78, 0.62));
-      float diffuse = max(dot(normal, lightDir), 0.0);
-      vec3 viewDir = vec3(0.0, 0.0, 1.0);
-      float spec = pow(max(dot(reflect(-lightDir, normal), viewDir), 0.0), 46.0);
-      float rim = pow(1.0 - clamp(normal.z, 0.0, 1.0), 1.6);
-      float grain = (fract(sin(dot(uv * 180.0, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) * uFlicker * 0.04;
+    if (alpha > 0.003) {
+      float t = clamp(-d / 0.022, 0.0, 1.0);
+      float grain = (fract(sin(dot(uv * 180.0, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) * uFlicker * 0.05;
 
-      // Darker meniscus at the rim, airy centre → reads as depth, not a stencil.
-      vec3 deep = uColorAccent * 0.5;
-      color = mix(deep, uColorPrimary, 0.3 + h * 0.7);
-      color *= 0.52 + diffuse * 0.55;
-      color += uColorHighlight * spec * 1.0;
-      color += uColorHighlight * rim * 0.34;
+      // Flat white puffs with faintly gray creases where blobs meet and along
+      // the rim — soft billowing clouds, no specular, no lighting.
+      vec3 base = mix(uColorAccent, uColorPrimary, 0.4 + t * 0.6);
+      color = base * (0.8 + t * 0.2);
+      color += uColorHighlight * t * 0.05;
       color -= vec3(grain);
     }
 
@@ -3153,6 +3134,8 @@ type SdfBubble = {
   role: SdfBubbleRole;
   anchorX: number;
   anchorY: number;
+  /** Drift mode: a stray dot orbiting the silhouette instead of packing it. */
+  satellite?: boolean;
 };
 
 function worldToSdfSpace(x: number, y: number) {
@@ -3457,7 +3440,7 @@ function applySdfAquariumBodyMotion(
 
 function createAquariumBaseRadius(sizeScale: number, role: SdfBubbleRole) {
   if (role === "body") {
-    return (0.013 + Math.random() * 0.012) * sizeScale;
+    return (0.018 + Math.random() * 0.015) * sizeScale;
   }
 
   return (0.0032 + Math.random() * 0.0044) * sizeScale;
@@ -3834,17 +3817,22 @@ function SdfBubbleLogo({
           applySdfBubbleDrift(bubble, time, flow, spin, subDt);
         }
 
-        if (attract > 0.0001 && spawnOrigins.current.length > 0) {
-          const origin =
-            spawnOrigins.current[bubble.seed % spawnOrigins.current.length] ??
-            spawnOrigins.current[0];
-          const toOrigin = new THREE.Vector2(origin.x - bubble.pos.x, origin.y - bubble.pos.y);
-          const originDistance = toOrigin.length();
+        if (attract > 0.0001) {
+          // Leash every puff to its own spawn anchor (they're sampled across the
+          // glyph), so the cloud holds the shape while boiling. NOTE: this used
+          // to index spawnOrigins with a fractional seed, which always fell back
+          // to origins[0] — every bubble was pulled to one corner.
+          const gain = bubble.satellite ? attract * 3.5 : attract;
+          const toAnchor = new THREE.Vector2(
+            bubble.anchorX - bubble.pos.x,
+            bubble.anchorY - bubble.pos.y
+          );
+          const anchorDistance = toAnchor.length();
 
-          if (originDistance > 0.0001) {
+          if (anchorDistance > 0.0001) {
             bubble.vel.addScaledVector(
-              toOrigin.normalize(),
-              attract * originDistance * subDt
+              toAnchor.normalize(),
+              gain * anchorDistance * subDt
             );
           }
         }
@@ -3884,10 +3872,20 @@ function SdfBubbleLogo({
               bubble.cyclePhase
             );
           }
+        } else {
+          // 뭉게뭉게: puffs slowly swell and shrink so the cloud gently boils.
+          bubble.radius =
+            bubble.baseRadius *
+            (1 +
+              Math.sin(time * bubble.cycleRate + bubble.cyclePhase) *
+                (0.08 + settings.breathe * 0.6));
         }
 
         if (activeMask) {
-          if (!aquarium || bubble.role === "body") {
+          if (!aquarium && bubble.satellite) {
+            // Stray dots roam across the silhouette freely — the anchor leash
+            // is what keeps them hovering around it.
+          } else if (!aquarium || bubble.role === "body") {
             resolveSdfBubbleWallCollision(bubble, activeMask, aquarium ? 0.5 : 0.58);
             resolveSdfBubbleWallCollision(bubble, activeMask, aquarium ? 0.34 : 0.42);
           } else {
@@ -3936,8 +3934,8 @@ function SdfBubbleLogo({
           resolveSdfSphereCollision(
             a,
             b,
-            aquarium ? (a.role === "riser" ? 0.32 : 0.52) : 0.68,
-            aquarium ? 0.38 : 0.52
+            aquarium ? (a.role === "riser" ? 0.32 : 0.52) : 0.16,
+            aquarium ? 0.38 : 0.3
           );
         }
       }
@@ -4027,9 +4025,14 @@ function createSdfBubble(
   const bodyCount = aquarium ? getSdfAquariumBodyCount(activeBubbleCount) : 0;
   const isBody = aquarium && index < bodyCount;
   const role: SdfBubbleRole = isBody ? "body" : "riser";
+  // Drift: mostly fat cotton puffs, plus a scatter of stray satellite dots that
+  // hover around the silhouette (the crumbs around the cloud in the reference).
+  const satellite = !aquarium && index % 5 === 4;
   const baseRadius = aquarium
     ? createAquariumBaseRadius(sizeScale, role)
-    : (0.0095 + Math.random() * 0.0105) * sizeScale;
+    : satellite
+    ? (0.0028 + Math.random() * 0.0036) * sizeScale
+    : (0.019 + Math.random() * 0.016) * sizeScale;
   let pos: THREE.Vector2;
   let vel: THREE.Vector2;
 
@@ -4085,7 +4088,8 @@ function createSdfBubble(
     spawnY: pos.y,
     role: aquarium ? role : "riser",
     anchorX: pos.x,
-    anchorY: pos.y
+    anchorY: pos.y,
+    satellite
   };
 }
 
