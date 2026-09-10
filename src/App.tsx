@@ -21,23 +21,33 @@ import {
   PenLine,
   Play,
   RefreshCcw,
+  Repeat,
   SlidersHorizontal,
   Sparkles,
   Square,
   Trash2,
   Undo2,
   Upload,
+  Video,
   X
 } from "lucide-react";
-import { DEFAULT_SVG } from "./defaultLogo";
+import { DEFAULT_SVG, DEFAULT_SVG_B } from "./defaultLogo";
 import {
   getVisibleLogoStyles,
+  logoStyleToPath,
   LOGO_STYLES,
   resolveLogoStyleFromSlug
 } from "./effectsCatalog";
+import {
+  DEFAULT_TIMELINE,
+  timeToMorphBlend,
+  timelineDuration,
+  type TimelineSpec
+} from "./logoMorph";
 import { ParticleLogoScene } from "./ParticleLogoScene";
 import { getRecommendedParticleCount, sampleSvgToParticles } from "./svgSampler";
 import { sanitizeSvgText } from "./svgSanitize";
+import { downloadBlob, findCaptureCanvas, recordCanvas } from "./videoCapture";
 import type {
   FancyVariant,
   LogoSource,
@@ -533,7 +543,7 @@ const EFFECT_SETTING_PRESETS: Record<LogoStyle, EffectSettings> = {
 
 function readLogoStyleFromUrl(): LogoStyle {
   if (typeof window === "undefined") {
-    return "dust";
+    return "walkers";
   }
   const slug = window.location.pathname.replace(/^\/+|\/+$/g, "").toLowerCase();
   return resolveLogoStyleFromSlug(slug);
@@ -590,6 +600,7 @@ const DRAW_MIN_DISTANCE = 1.6;
 
 type SourceMode = "markup" | "draw";
 type DrawTool = "brush" | "pen" | "line" | "rect" | "ellipse";
+type LogoSlot = "a" | "b";
 type DrawPoint = {
   x: number;
   y: number;
@@ -666,6 +677,23 @@ export default function App() {
   const [draftSvg, setDraftSvg] = useState(DEFAULT_SVG);
   const [draftName, setDraftName] = useState("whothree.svg");
   const [sourceMode, setSourceMode] = useState<SourceMode>("markup");
+  const [activeSlot, setActiveSlot] = useState<LogoSlot>("a");
+  const [logoA, setLogoA] = useState<LogoSource>({
+    kind: "paste",
+    name: "whothree.svg",
+    svgText: DEFAULT_SVG
+  });
+  const [logoB, setLogoB] = useState<LogoSource>({
+    kind: "paste",
+    name: "mark.svg",
+    svgText: DEFAULT_SVG_B
+  });
+  const [timelineSpec, setTimelineSpec] = useState<TimelineSpec>(DEFAULT_TIMELINE);
+  const [timelineTime, setTimelineTime] = useState(0);
+  const [timelinePlaying, setTimelinePlaying] = useState(true);
+  const [timelineLoop, setTimelineLoop] = useState(true);
+  const [recording, setRecording] = useState(false);
+  const [recordError, setRecordError] = useState<string | null>(null);
   const [drawTool, setDrawTool] = useState<DrawTool>("brush");
   const [drawFullscreen, setDrawFullscreen] = useState(false);
   const [drawStrokes, setDrawStrokes] = useState<DrawStroke[]>([]);
@@ -673,11 +701,6 @@ export default function App() {
   const [currentShapeStroke, setCurrentShapeStroke] = useState<ShapeStroke | null>(null);
   const [penNodes, setPenNodes] = useState<PenNode[]>([]);
   const [penPreviewPoint, setPenPreviewPoint] = useState<DrawPoint | null>(null);
-  const [activeSource, setActiveSource] = useState<LogoSource>({
-    kind: "paste",
-    name: "whothree.svg",
-    svgText: DEFAULT_SVG
-  });
   const [inputError, setInputError] = useState<string | null>(null);
   const [replayNonce, setReplayNonce] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
@@ -692,6 +715,13 @@ export default function App() {
   const [webgpuSupported, setWebgpuSupported] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const jsonExportRef = useRef<HTMLTextAreaElement | null>(null);
+  const stageRef = useRef<HTMLElement | null>(null);
+  const timelinePlayingRef = useRef(false);
+  const timelineTimeRef = useRef(0);
+  const timelineLoopRef = useRef(true);
+  const timelineDirRef = useRef(1);
+  const recordingRef = useRef(false);
+  const durationRef = useRef(timelineDuration(DEFAULT_TIMELINE));
   const activePointerId = useRef<number | null>(null);
   const currentBrushStrokeRef = useRef<DrawPoint[]>([]);
   const currentShapeStrokeRef = useRef<ShapeStroke | null>(null);
@@ -709,6 +739,8 @@ export default function App() {
     [logoStyle, settingsByStyle]
   );
   const preview = useMemo(() => sanitizeSvgText(draftSvg), [draftSvg]);
+  const previewA = useMemo(() => sanitizeSvgText(logoA.svgText), [logoA.svgText]);
+  const previewB = useMemo(() => sanitizeSvgText(logoB.svgText), [logoB.svgText]);
   const visibleDrawStrokes = useMemo(
     () => [
       ...drawStrokes,
@@ -734,6 +766,14 @@ export default function App() {
   const visibleLogoStyles = useMemo(() => getVisibleLogoStyles(), []);
   const activeStyle = LOGO_STYLES.find((style) => style.id === settings.logoStyle) ?? LOGO_STYLES[0];
   const activeStyleIsDev = visibleLogoStyles.find((style) => style.id === settings.logoStyle)?.devOnly ?? false;
+  const morphDuration = timelineDuration(timelineSpec);
+  const morphBlend = timeToMorphBlend(timelineTime, timelineSpec);
+
+  timelinePlayingRef.current = timelinePlaying;
+  timelineTimeRef.current = timelineTime;
+  timelineLoopRef.current = timelineLoop;
+  recordingRef.current = recording;
+  durationRef.current = morphDuration;
 
   useEffect(() => {
     setWebglSupported(detectWebGlSupport());
@@ -741,7 +781,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const path = logoStyle === "dust" ? "/" : `/${logoStyle}`;
+    const path = logoStyleToPath(logoStyle);
     if (window.location.pathname !== path) {
       window.history.replaceState(null, "", `${path}${window.location.search}`);
     }
@@ -806,11 +846,16 @@ export default function App() {
       try {
         sampleSvgToParticles(sanitized.svgText, Math.min(settings.particleCount, 900), 47);
         liveDrawSvgRef.current = sanitized.svgText;
-        setActiveSource({
+        const liveSource: LogoSource = {
           kind: "paste",
           name: "Live drawing",
           svgText: sanitized.svgText
-        });
+        };
+        if (activeSlot === "b") {
+          setLogoB(liveSource);
+        } else {
+          setLogoA(liveSource);
+        }
         setInputError(null);
         setReplayNonce((value) => value + 1);
       } catch {
@@ -823,7 +868,7 @@ export default function App() {
         window.clearTimeout(drawCommitTimerRef.current);
       }
     };
-  }, [committedDrawingSvg, drawStrokes.length, settings.particleCount, sourceMode]);
+  }, [activeSlot, committedDrawingSvg, drawStrokes.length, settings.particleCount, sourceMode]);
 
   const updateSetting = <Key extends keyof ParticleSettings>(
     key: Key,
@@ -885,11 +930,16 @@ export default function App() {
         31
       );
       setSettingsByStyle(nextSettingsByStyle);
-      setActiveSource({
+      const nextSource: LogoSource = {
         kind: source.kind,
         name: source.name || "Pasted SVG",
         svgText: sanitized.svgText
-      });
+      };
+      if (activeSlot === "b") {
+        setLogoB(nextSource);
+      } else {
+        setLogoA(nextSource);
+      }
       setDraftSvg(sanitized.svgText);
       setInputError(null);
       setIsPaused(false);
@@ -941,10 +991,15 @@ export default function App() {
   const handleCopyEffectJson = async () => {
     const payload = {
       version: 1,
-      source: {
-        kind: activeSource.kind,
-        name: activeSource.name,
-        svgText: activeSource.svgText
+      sourceA: {
+        kind: logoA.kind,
+        name: logoA.name,
+        svgText: logoA.svgText
+      },
+      sourceB: {
+        kind: logoB.kind,
+        name: logoB.name,
+        svgText: logoB.svgText
       },
       effect: settings
     };
@@ -972,6 +1027,100 @@ export default function App() {
       setJsonCopyStatus((current) => (current === "copied" ? "idle" : current));
     }, 1400);
   };
+
+  const selectLogoSlot = (slot: LogoSlot) => {
+    const source = slot === "a" ? logoA : logoB;
+    setActiveSlot(slot);
+    setDraftSvg(source.svgText);
+    setDraftName(source.name || "");
+    setSourceMode("markup");
+    setInputError(null);
+  };
+
+  const playTimeline = (fromStart = false) => {
+    setIsPaused(false);
+    if (fromStart || timelineTimeRef.current >= durationRef.current - 0.02) {
+      timelineDirRef.current = 1;
+      timelineTimeRef.current = 0;
+      setTimelineTime(0);
+    }
+    setTimelinePlaying(true);
+  };
+
+  const handleSaveVideo = async () => {
+    if (recordingRef.current) {
+      return;
+    }
+    const canvas = findCaptureCanvas(stageRef.current);
+    if (!canvas) {
+      setRecordError("Nothing to capture yet.");
+      return;
+    }
+    setRecordError(null);
+    recordingRef.current = true;
+    setRecording(true);
+    setIsPaused(false);
+    setTimelinePlaying(false);
+    timelineDirRef.current = 1;
+    timelineTimeRef.current = 0;
+    setTimelineTime(0);
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
+    setTimelinePlaying(true);
+    try {
+      const { blob, extension } = await recordCanvas(canvas, {
+        durationMs: durationRef.current * 1000,
+        fps: 30
+      });
+      downloadBlob(blob, `logo-morph-${settings.logoStyle}.${extension}`);
+    } catch (error) {
+      setRecordError(error instanceof Error ? error.message : "Video recording failed.");
+    } finally {
+      recordingRef.current = false;
+      setRecording(false);
+      if (timelineLoopRef.current) {
+        timelineDirRef.current = 1;
+        setTimelinePlaying(true);
+      } else {
+        setTimelinePlaying(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!timelinePlaying || isPaused) {
+      return;
+    }
+    let raf = 0;
+    let last = performance.now();
+    const tick = (now: number) => {
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      const duration = durationRef.current;
+      let next = timelineTimeRef.current + dt * timelineDirRef.current;
+      if (next >= duration) {
+        if (timelineLoopRef.current && !recordingRef.current) {
+          timelineDirRef.current = -1;
+          next = duration;
+        } else {
+          next = duration;
+          timelineTimeRef.current = next;
+          setTimelineTime(next);
+          setTimelinePlaying(false);
+          return;
+        }
+      } else if (next <= 0) {
+        timelineDirRef.current = 1;
+        next = 0;
+      }
+      timelineTimeRef.current = next;
+      setTimelineTime(next);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [isPaused, timelinePlaying]);
 
   const handleDrawPointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
     if (event.pointerType === "mouse" && event.button !== 0) {
@@ -1208,7 +1357,7 @@ export default function App() {
     <div
       className={`app-shell ${panelVisible ? "" : "panel-hidden"} ${
         mobileUiOpen ? "mobile-ui-open" : ""
-      } ${modeMenuOpen ? "mobile-effects-open" : ""}`}
+      } ${modeMenuOpen ? "mobile-effects-open" : ""} ${recording ? "is-recording" : ""}`}
     >
       <button
         type="button"
@@ -1238,7 +1387,9 @@ export default function App() {
           </div>
           <div>
             <h1>Particle SVG Logo</h1>
-            <p>{activeSource.name || "Untitled SVG"}</p>
+            <p>
+              {logoA.name || "Logo A"} → {logoB.name || "Logo B"}
+            </p>
           </div>
         </header>
 
@@ -1246,6 +1397,47 @@ export default function App() {
           <div className="section-title">
             <FileCode2 size={14} />
             <span>SVG source</span>
+          </div>
+
+          <div className="logo-slots" role="tablist" aria-label="Logo morph targets">
+            <button
+              className={`logo-slot ${activeSlot === "a" ? "active" : ""}`}
+              type="button"
+              role="tab"
+              aria-selected={activeSlot === "a"}
+              onClick={() => selectLogoSlot("a")}
+            >
+              <span className="logo-slot-preview" aria-hidden="true">
+                {previewA.ok ? (
+                  <span dangerouslySetInnerHTML={{ __html: previewA.svgText }} />
+                ) : (
+                  "A"
+                )}
+              </span>
+              <span className="logo-slot-copy">
+                <strong>Logo A</strong>
+                <small>{logoA.name || "Start"}</small>
+              </span>
+            </button>
+            <button
+              className={`logo-slot ${activeSlot === "b" ? "active" : ""}`}
+              type="button"
+              role="tab"
+              aria-selected={activeSlot === "b"}
+              onClick={() => selectLogoSlot("b")}
+            >
+              <span className="logo-slot-preview" aria-hidden="true">
+                {previewB.ok ? (
+                  <span dangerouslySetInnerHTML={{ __html: previewB.svgText }} />
+                ) : (
+                  "B"
+                )}
+              </span>
+              <span className="logo-slot-copy">
+                <strong>Logo B</strong>
+                <small>{logoB.name || "End"}</small>
+              </span>
+            </button>
           </div>
 
           <div className="source-tabs" role="tablist" aria-label="SVG input mode">
@@ -1281,7 +1473,7 @@ export default function App() {
             </button>
             <button className="button primary" onClick={handleApply} disabled={!preview.ok}>
               <Play size={14} />
-              Apply
+              Apply {activeSlot === "b" ? "B" : "A"}
             </button>
             <button
               className="icon-button"
@@ -1527,6 +1719,68 @@ export default function App() {
           />
 
           {inputError && <div className="error-line">{inputError}</div>}
+        </section>
+
+        <section className="panel-section morph-section">
+          <div className="section-title">
+            <Repeat size={14} />
+            <span>Logo morph</span>
+          </div>
+          <SliderControl
+            label="Hold A"
+            value={timelineSpec.holdA}
+            min={0.4}
+            max={4}
+            step={0.1}
+            format={(value) => `${value.toFixed(1)}s`}
+            onChange={(value) => setTimelineSpec((current) => ({ ...current, holdA: value }))}
+          />
+          <SliderControl
+            label="Morph"
+            value={timelineSpec.morph}
+            min={1}
+            max={10}
+            step={0.1}
+            format={(value) => `${value.toFixed(1)}s`}
+            onChange={(value) => setTimelineSpec((current) => ({ ...current, morph: value }))}
+          />
+          <SliderControl
+            label="Hold B"
+            value={timelineSpec.holdB}
+            min={0.4}
+            max={4}
+            step={0.1}
+            format={(value) => `${value.toFixed(1)}s`}
+            onChange={(value) => setTimelineSpec((current) => ({ ...current, holdB: value }))}
+          />
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={timelineLoop}
+              onChange={(event) => setTimelineLoop(event.target.checked)}
+            />
+            Loop A ↔ B
+          </label>
+          <div className="source-actions morph-actions">
+            <button
+              className="button secondary"
+              type="button"
+              onClick={() => (timelinePlaying ? setTimelinePlaying(false) : playTimeline(true))}
+            >
+              {timelinePlaying ? <Pause size={14} /> : <Play size={14} />}
+              {timelinePlaying ? "Stop morph" : "Play morph"}
+            </button>
+            <button
+              className="button primary"
+              type="button"
+              onClick={handleSaveVideo}
+              disabled={recording}
+            >
+              <Video size={14} />
+              {recording ? "Recording…" : "Save video"}
+            </button>
+          </div>
+          {recordError && <div className="error-line">{recordError}</div>}
         </section>
 
         <section className="panel-section controls-section">
@@ -3327,15 +3581,22 @@ export default function App() {
         </section>
       </aside>
 
-      <main className="stage" aria-label="Particle logo preview">
+      <main ref={stageRef} className="stage" aria-label="Particle logo preview">
         <ParticleLogoScene
-          svgText={activeSource.svgText}
+          svgText={logoA.svgText}
+          svgTextB={logoB.svgText}
+          morphBlend={morphBlend}
+          captureClean={recording}
           settings={settings}
           replayNonce={replayNonce}
           paused={isPaused}
           webglSupported={webglSupported}
           webgpuSupported={webgpuSupported}
         />
+
+        <div className="record-badge" role="status">
+          Recording
+        </div>
 
         <div className="stage-hud stage-hud-top stage-hud-desktop" aria-label="Shader workspace navigation">
           <div className="hud-brand">SVG SHADER LAB</div>
@@ -3386,6 +3647,37 @@ export default function App() {
           </button>
         </div>
 
+        <div className="stage-timeline" aria-label="Logo morph timeline">
+          <span className="timeline-end">A</span>
+          <label className="timeline-track">
+            <span className="visually-hidden">Morph time</span>
+            <span
+              className="timeline-morph-window"
+              style={{
+                left: `${(timelineSpec.holdA / Math.max(0.001, morphDuration)) * 100}%`,
+                width: `${(timelineSpec.morph / Math.max(0.001, morphDuration)) * 100}%`
+              }}
+            />
+            <input
+              type="range"
+              min={0}
+              max={morphDuration}
+              step={0.01}
+              value={timelineTime}
+              onChange={(event) => {
+                setTimelinePlaying(false);
+                const next = Number(event.target.value);
+                timelineTimeRef.current = next;
+                setTimelineTime(next);
+              }}
+            />
+          </label>
+          <span className="timeline-end">B</span>
+          <span className="timeline-time">
+            {timelineTime.toFixed(1)} / {morphDuration.toFixed(1)}s
+          </span>
+        </div>
+
         <div className="stage-hud stage-hud-bottom stage-hud-desktop" aria-label="Shader playback controls">
           <div className="hud-playback">
             <button type="button" onClick={() => setIsPaused((value) => !value)}>
@@ -3397,9 +3689,20 @@ export default function App() {
               onClick={() => {
                 setIsPaused(false);
                 setReplayNonce((value) => value + 1);
+                timelineDirRef.current = 1;
+                timelineTimeRef.current = 0;
+                setTimelineTime(0);
               }}
             >
               REPLAY
+            </button>
+            <span aria-hidden="true">|</span>
+            <button
+              type="button"
+              className={timelinePlaying ? "active" : ""}
+              onClick={() => (timelinePlaying ? setTimelinePlaying(false) : playTimeline(true))}
+            >
+              {timelinePlaying ? "STOP MORPH" : "MORPH"}
             </button>
           </div>
             <div className="hud-readout">
@@ -3450,21 +3753,24 @@ export default function App() {
                 : settings.logoStyle === "vfx"
                 ? "VFX THRU SHADOW"
                 : settings.logoStyle === "walkers"
-                ? "WEBCAM CROWD FLOW"
+                ? "CROWD MORPH FLOW"
                 : settings.logoStyle === "sdf"
                 ? "SDF METABALL BUBBLES"
                 : isSurfaceLogoStyle(settings.logoStyle)
                 ? "SVG MASK SHADER"
                 : `${settings.particleCount.toLocaleString()} PARTICLES`}
             </span>
-              <span>{activeSource.name || "UNTITLED SVG"}</span>
+              <span>
+                {logoA.name || "A"} → {logoB.name || "B"}
+              </span>
             </div>
           <button
             className="hud-upload"
             type="button"
-            onClick={() => fileInputRef.current?.click()}
+            onClick={handleSaveVideo}
+            disabled={recording}
           >
-            Upload SVG
+            {recording ? "Recording…" : "Save video"}
           </button>
         </div>
 

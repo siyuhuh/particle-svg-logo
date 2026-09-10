@@ -13,12 +13,13 @@ export type VisibleLogoStyle = LogoStyleMeta & {
 
 /** Shipped on production — reorder here when promoting a dev effect. */
 export const PRODUCTION_LOGO_STYLE_IDS = [
+  "walkers",
+  "sdf",
+  "bubbles",
   "dust",
   "lines",
   "ascii",
   "ascii2",
-  "walkers",
-  "sdf",
   "metal",
   "gommage",
   "hyperspace",
@@ -91,14 +92,20 @@ export function getVisibleLogoStyles(includeDev = import.meta.env.DEV): VisibleL
   return [...production, ...devOnly];
 }
 
+export const DEFAULT_LOGO_STYLE: LogoStyle = "walkers";
+
+export function logoStyleToPath(style: LogoStyle) {
+  return style === DEFAULT_LOGO_STYLE ? "/" : `/${style}`;
+}
+
 export function resolveLogoStyleFromSlug(slug: string, includeDev = import.meta.env.DEV): LogoStyle {
-  if (!ALL_LOGO_STYLE_IDS.has(slug)) {
-    return "dust";
+  if (!slug || !ALL_LOGO_STYLE_IDS.has(slug)) {
+    return DEFAULT_LOGO_STYLE;
   }
 
   const id = slug as LogoStyle;
   if (!includeDev && !isProductionLogoStyle(id)) {
-    return "dust";
+    return DEFAULT_LOGO_STYLE;
   }
 
   return id;

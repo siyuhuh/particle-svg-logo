@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef } from "react";
-import { sampleSvgToParticles } from "./svgSampler";
-import { LOGO_CONTENT_WORLD_SIZE } from "./sceneSizing";
+import { matchLogoHomes, sampleWalkerHomes } from "./logoMorph";
 import { useHandTracking, type TrackedHand } from "./useHandTracking";
 import type { ParticleSettings } from "./types";
 
 type WebcamWalkersOverlayProps = {
   svgText: string;
+  svgTextB?: string;
+  morphBlend?: number;
+  captureClean?: boolean;
   settings: ParticleSettings;
   replayNonce: number;
   paused: boolean;
@@ -42,6 +44,12 @@ type Walker = {
   chat: number;
   /** Which way to face while chatting (toward the partner). */
   chatDir: number;
+  /** Logo A home in normalized logo space. */
+  ax: number;
+  ay: number;
+  /** Logo B home in normalized logo space. */
+  bx: number;
+  by: number;
 };
 
 // Walk-cycle sprite sheet. Rows = PALETTE_STEPS heat steps × GENDERS (male, female).
@@ -185,6 +193,11 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
+function smoothstep(edge0: number, edge1: number, x: number) {
+  const t = clamp((x - edge0) / Math.max(0.0001, edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
 // Cheap deterministic hash in [0,1) from a seed.
 function hash(n: number) {
   const s = Math.sin(n * 12.9898) * 43758.5453;
@@ -202,6 +215,9 @@ function snoise(t: number, seed: number) {
 
 export function WebcamWalkersOverlay({
   svgText,
+  svgTextB,
+  morphBlend = 0,
+  captureClean = false,
   settings,
   replayNonce,
   paused
@@ -225,49 +241,29 @@ export function WebcamWalkersOverlay({
     [settings.particleColor, settings.particleAccentColor, settings.particleHighlightColor]
   );
 
-  // Sample the SVG onto an EVEN GRID so the crowd covers the shape uniformly.
-  // (Random sampling left gaps on thin stroke-only outlines — drawn SVGs — making
-  // them look "unclosed". Snapping a dense sample to a grid keeps lines continuous.)
+  // Sample both logos onto an EVEN GRID so the crowd covers each shape uniformly,
+  // then pair homes so people take short walks from A to B.
   const homes = useMemo(() => {
-    const grid = clamp(Math.round(46 * Math.sqrt(settings.particleCount / 8000)), 40, 104);
-    try {
-      const denseCount = clamp(settings.particleCount, 6000, 18000);
-      const raw = sampleSvgToParticles(svgText, denseCount, 11);
-      const seen = new Set<number>();
-      const out: Array<{ nx: number; ny: number }> = [];
-      for (let i = 0; i < raw.count; i += 1) {
-        const px = raw.positions[i * 3];
-        const py = raw.positions[i * 3 + 1];
-        const nx = px / LOGO_CONTENT_WORLD_SIZE + 0.5;
-        const ny = 0.5 - py / LOGO_CONTENT_WORLD_SIZE;
-        const gx = Math.round(nx * grid);
-        const gy = Math.round(ny * grid);
-        const key = gx * 8192 + gy;
-        if (!seen.has(key)) {
-          seen.add(key);
-          // Snap to the cell centre so the lattice is perfectly even.
-          out.push({ nx: gx / grid, ny: gy / grid });
-        }
-      }
-      return { points: out, grid };
-    } catch {
-      return { points: [] as Array<{ nx: number; ny: number }>, grid };
-    }
-  }, [svgText, settings.particleCount]);
+    const pointsA = sampleWalkerHomes(svgText, settings.particleCount);
+    const pointsB = svgTextB && svgTextB !== svgText
+      ? sampleWalkerHomes(svgTextB, settings.particleCount)
+      : pointsA;
+    return matchLogoHomes(pointsA, pointsB.length > 0 ? pointsB : pointsA);
+  }, [svgText, svgTextB, settings.particleCount]);
 
   // Latest props available to the rAF loop without restarting it.
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
-  const homesRef = useRef(homes);
-  const gridRef = useRef(homes.grid);
+  const morphBlendRef = useRef(morphBlend);
+  morphBlendRef.current = morphBlend;
+  const captureCleanRef = useRef(captureClean);
+  captureCleanRef.current = captureClean;
   const walkersRef = useRef<Walker[]>([]);
 
-  // Rebuild walkers whenever the logo shape / count changes.
+  // Rebuild walkers whenever the logo pair / count changes.
   useEffect(() => {
-    homesRef.current = homes;
-    gridRef.current = homes.grid;
     const view = containerRef.current?.getBoundingClientRect();
     const w = view?.width ?? window.innerWidth;
     const h = view?.height ?? window.innerHeight;
@@ -276,9 +272,9 @@ export function WebcamWalkersOverlay({
     const oy = h / 2 - fit / 2;
 
     const prev = walkersRef.current;
-    const next: Walker[] = homes.points.map((home, i) => {
-      const hx = ox + home.nx * fit;
-      const hy = oy + home.ny * fit;
+    const next: Walker[] = homes.map((home, i) => {
+      const hx = ox + home.ax * fit;
+      const hy = oy + home.ay * fit;
       const old = prev[i];
       // Fresh walkers are placed near home by resize() (which has the real canvas
       // bounds); the build effect can run while the overlay is unmounted, so its
@@ -290,8 +286,12 @@ export function WebcamWalkersOverlay({
         vy: old ? old.vy : 0,
         hx,
         hy,
-        nx: home.nx,
-        ny: home.ny,
+        nx: home.ax,
+        ny: home.ay,
+        ax: home.ax,
+        ay: home.ay,
+        bx: home.bx,
+        by: home.by,
         phase: old ? old.phase : Math.random() * Math.PI * 2,
         face: old ? old.face : Math.random() < 0.5 ? -1 : 1,
         sMul: old ? old.sMul : 0.74 + Math.random() * 0.52,
@@ -433,7 +433,9 @@ export function WebcamWalkersOverlay({
       // home; while a hand is still on screen, piles persist (worked area stays clean).
       const releaseFade = clamp(0.085 * Math.max(0.3, cfg.animationSpeed * 2), 0.04, 0.2);
       // Bounded sway around home → the standing crowd shuffles without drifting away.
-      const spacing = (Math.min(cssW, cssH) * 0.78) / Math.max(1, gridRef.current);
+      const spacing =
+        (Math.min(cssW, cssH) * 0.78) /
+        Math.max(8, Math.round(Math.sqrt(Math.max(1, walkers.length)) * 1.4));
       const swayAmp = spacing * (0.12 + cfg.turbulence * 0.5);
       // On-screen figure size (mirrors the render size below) and the ground distance a
       // full 2-step gait should cover — used to FOOT-LOCK the legs so a stride matches the
@@ -605,6 +607,10 @@ export function WebcamWalkersOverlay({
       if (!pausedRef.current) {
         for (let i = 0; i < walkers.length; i += 1) {
           const wkr = walkers[i];
+          const delay = hash(wkr.wSeed + 3) * 0.28;
+          const blend = smoothstep(delay, 0.78 + delay * 0.18, morphBlendRef.current);
+          wkr.nx = wkr.ax + (wkr.bx - wkr.ax) * blend;
+          wkr.ny = wkr.ay + (wkr.by - wkr.ay) * blend;
           wkr.hx = ox + wkr.nx * fit;
           wkr.hy = oy + wkr.ny * fit;
           // Place fresh walkers on the logo once we have real bounds (>1px) → the
@@ -884,7 +890,7 @@ export function WebcamWalkersOverlay({
       }
 
       // --- Render ---
-      if (video && video.readyState >= 2) {
+      if (!captureCleanRef.current && video && video.readyState >= 2) {
         drawCover(video);
         ctx.fillStyle = "rgba(2, 5, 10, 0.46)";
         ctx.fillRect(0, 0, cssW, cssH);
@@ -956,7 +962,11 @@ export function WebcamWalkersOverlay({
   return (
     <div ref={containerRef} className="webcam-walkers-overlay" aria-hidden="true">
       <canvas ref={canvasRef} className="webcam-walkers-canvas" />
-      <div className={`webcam-walkers-status status-${status}`} role="status">
+      <div
+        className={`webcam-walkers-status status-${status}`}
+        role="status"
+        hidden={captureClean}
+      >
         {status === "requesting" && "Requesting camera…"}
         {status === "active" &&
           (modelReady

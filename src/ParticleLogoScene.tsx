@@ -13,6 +13,7 @@ import {
   SURFACE_PLANE_WORLD_SIZE
 } from "./sceneSizing";
 import { sampleSvgToParticles } from "./svgSampler";
+import { alignTargetPositions } from "./logoMorph";
 import { WebcamWalkersOverlay } from "./WebcamWalkersOverlay";
 import { HandPointerControl } from "./HandPointerControl";
 import { handInput } from "./handInput";
@@ -22,6 +23,9 @@ import type { LogoStyle, ParticleBuffers, ParticleSettings } from "./types";
 
 type ParticleLogoSceneProps = {
   svgText: string;
+  svgTextB?: string;
+  morphBlend?: number;
+  captureClean?: boolean;
   settings: ParticleSettings;
   replayNonce: number;
   paused: boolean;
@@ -60,6 +64,7 @@ const surfaceMaskCanvasCache = new Map<string, SurfaceMaskCacheEntry>();
 
 const vertexShader = `
   attribute vec3 aOrigin;
+  attribute vec3 aTargetB;
   attribute float aSeed;
   attribute float aSize;
   attribute float aDelay;
@@ -79,6 +84,7 @@ const vertexShader = `
   uniform float uDpr;
   uniform float uStyle;
   uniform float uMotionSpeed;
+  uniform float uMorph;
   uniform vec2 uMouse;
 
   varying float vIntensity;
@@ -162,7 +168,7 @@ const vertexShader = `
     float blossomStyle = 1.0 - step(0.5, abs(uStyle - 16.0));
     float gazeStyle = 1.0 - step(0.5, abs(uStyle - 17.0));
     float typingStyle = max(max(cloudStyle, bubbleStyle), max(blossomStyle, gazeStyle));
-    vec3 target = position;
+    vec3 target = mix(position, aTargetB, clamp(uMorph, 0.0, 1.0));
     vec3 origin = aOrigin;
     vec3 formed = mix(origin, target, localProgress);
     float driftA = aSeed * 0.013 + uTime * (0.45 + hash(aSeed) * 0.65);
@@ -1900,6 +1906,9 @@ const trailDisplayFragmentShader = `
 
 export function ParticleLogoScene({
   svgText,
+  svgTextB,
+  morphBlend = 0,
+  captureClean = false,
   settings,
   replayNonce,
   paused,
@@ -1913,29 +1922,30 @@ export function ParticleLogoScene({
   const fancyStyle = settings.logoStyle === "fancy";
   const walkersStyle = settings.logoStyle === "walkers";
   const sdfStyle = settings.logoStyle === "sdf";
+  const particleMorph = !surfaceStyle && !asciiStyle && !asciiRasterStyle && !fancyStyle && !walkersStyle && !sdfStyle;
+  const svgNow = morphBlend < 0.5 ? svgText : svgTextB || svgText;
   const asciiParticleCount = Math.min(
     5600,
     Math.max(1800, Math.round(settings.particleCount * 0.28))
   );
   const buffers = useMemo(
     () =>
-      surfaceStyle || asciiStyle || asciiRasterStyle || fancyStyle || walkersStyle || sdfStyle
-        ? null
-        : sampleSvgToParticles(svgText, settings.particleCount, 19),
-    [
-      asciiRasterStyle,
-      asciiStyle,
-      fancyStyle,
-      walkersStyle,
-      sdfStyle,
-      settings.particleCount,
-      surfaceStyle,
-      svgText
-    ]
+      particleMorph ? sampleSvgToParticles(svgText, settings.particleCount, 19) : null,
+    [particleMorph, settings.particleCount, svgText]
   );
+  const buffersB = useMemo(() => {
+    if (!particleMorph || !svgTextB || svgTextB === svgText) {
+      return null;
+    }
+    try {
+      return sampleSvgToParticles(svgTextB, settings.particleCount, 19);
+    } catch {
+      return null;
+    }
+  }, [particleMorph, settings.particleCount, svgText, svgTextB]);
   const asciiBuffers = useMemo(
-    () => (asciiStyle ? sampleSvgToParticles(svgText, asciiParticleCount, 23) : null),
-    [asciiParticleCount, asciiStyle, svgText]
+    () => (asciiStyle ? sampleSvgToParticles(svgNow, asciiParticleCount, 23) : null),
+    [asciiParticleCount, asciiStyle, svgNow]
   );
 
   if (!webglSupported) {
@@ -1949,6 +1959,7 @@ export function ParticleLogoScene({
 
   return (
     <div
+      data-capture-root
       className={`scene-wrap scene-style-${settings.logoStyle} ${
         settings.gridVisible ? "with-grid" : ""
       } ${sdfStyle && settings.handControl ? "with-camera" : ""}`}
@@ -1961,7 +1972,8 @@ export function ParticleLogoScene({
         gl={{
           antialias: metalStyle,
           alpha: true,
-          powerPreference: "high-performance"
+          powerPreference: "high-performance",
+          preserveDrawingBuffer: true
         }}
       >
         <ambientLight intensity={metalStyle ? 0.42 : 0.2} />
@@ -1969,7 +1981,7 @@ export function ParticleLogoScene({
         <ResponsiveLogoScale>
           {metalStyle ? (
             <ChromeExtrudedLogo
-              svgText={svgText}
+              svgText={svgNow}
               settings={settings}
               replayNonce={replayNonce}
               paused={paused}
@@ -1983,21 +1995,21 @@ export function ParticleLogoScene({
             />
           ) : settings.logoStyle === "trail" ? (
             <SvgTrailFeedback
-              svgText={svgText}
+              svgText={svgNow}
               settings={settings}
               replayNonce={replayNonce}
               paused={paused}
             />
           ) : sdfStyle ? (
             <SdfBubbleLogo
-              svgText={svgText}
+              svgText={svgNow}
               settings={settings}
               replayNonce={replayNonce}
               paused={paused}
             />
           ) : surfaceStyle ? (
             <SvgSurfaceShader
-              svgText={svgText}
+              svgText={svgNow}
               settings={settings}
               replayNonce={replayNonce}
               paused={paused}
@@ -2005,6 +2017,8 @@ export function ParticleLogoScene({
           ) : buffers ? (
             <ParticleCloud
               buffers={buffers}
+              buffersB={buffersB}
+              morphBlend={morphBlend}
               settings={settings}
               replayNonce={replayNonce}
               paused={paused}
@@ -2024,7 +2038,7 @@ export function ParticleLogoScene({
       </Canvas>
       {asciiRasterStyle && (
         <AsciiRasterOverlay
-          svgText={svgText}
+          svgText={svgNow}
           settings={settings}
           replayNonce={replayNonce}
           paused={paused}
@@ -2032,7 +2046,7 @@ export function ParticleLogoScene({
       )}
       {fancyStyle && (
         <FancyLetterOverlay
-          svgText={svgText}
+          svgText={svgNow}
           settings={settings}
           replayNonce={replayNonce}
           paused={paused}
@@ -2041,6 +2055,9 @@ export function ParticleLogoScene({
       {walkersStyle && (
         <WebcamWalkersOverlay
           svgText={svgText}
+          svgTextB={svgTextB}
+          morphBlend={morphBlend}
+          captureClean={captureClean}
           settings={settings}
           replayNonce={replayNonce}
           paused={paused}
@@ -4968,11 +4985,15 @@ function AsciiGlyphParticles({
 
 function ParticleCloud({
   buffers,
+  buffersB,
+  morphBlend = 0,
   settings,
   replayNonce,
   paused
 }: {
   buffers: ParticleBuffers;
+  buffersB?: ParticleBuffers | null;
+  morphBlend?: number;
   settings: ParticleSettings;
   replayNonce: number;
   paused: boolean;
@@ -5003,6 +5024,7 @@ function ParticleCloud({
         uDpr: { value: 1 },
         uStyle: { value: getStyleIndex(settings.logoStyle) },
         uMotionSpeed: { value: settings.animationSpeed },
+        uMorph: { value: 0 },
         uColorPrimary: { value: new THREE.Color(settings.particleColor) },
         uColorAccent: { value: new THREE.Color(settings.particleAccentColor) },
         uColorHighlight: { value: new THREE.Color(settings.particleHighlightColor) },
@@ -5022,7 +5044,11 @@ function ParticleCloud({
 
   const geometry = useMemo(() => {
     const nextGeometry = new THREE.BufferGeometry();
+    const targetB = buffersB
+      ? alignTargetPositions(buffers.positions, buffersB.positions)
+      : buffers.positions;
     nextGeometry.setAttribute("position", new THREE.BufferAttribute(buffers.positions, 3));
+    nextGeometry.setAttribute("aTargetB", new THREE.BufferAttribute(targetB, 3));
     nextGeometry.setAttribute("aOrigin", new THREE.BufferAttribute(buffers.origins, 3));
     nextGeometry.setAttribute("aSeed", new THREE.BufferAttribute(buffers.seeds, 1));
     nextGeometry.setAttribute("aSize", new THREE.BufferAttribute(buffers.sizes, 1));
@@ -5033,7 +5059,7 @@ function ParticleCloud({
     );
     nextGeometry.computeBoundingSphere();
     return nextGeometry;
-  }, [buffers]);
+  }, [buffers, buffersB]);
 
   useEffect(() => {
     const nextBlending =
@@ -5126,6 +5152,7 @@ function ParticleCloud({
     material.uniforms.uDpr.value = Math.min(2, state.gl.getPixelRatio());
     material.uniforms.uStyle.value = getStyleIndex(settings.logoStyle);
     material.uniforms.uMotionSpeed.value = settings.animationSpeed;
+    material.uniforms.uMorph.value = morphBlend;
     material.uniforms.uColorPrimary.value.set(settings.particleColor);
     material.uniforms.uColorAccent.value.set(settings.particleAccentColor);
     material.uniforms.uColorHighlight.value.set(settings.particleHighlightColor);
