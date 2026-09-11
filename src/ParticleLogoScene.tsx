@@ -13,7 +13,7 @@ import {
   SURFACE_PLANE_WORLD_SIZE
 } from "./sceneSizing";
 import { sampleSvgToParticles } from "./svgSampler";
-import { alignTargetPositions } from "./logoMorph";
+import { chainMatchPositions, matchPointPairs } from "./logoMorph";
 import { WebcamWalkersOverlay } from "./WebcamWalkersOverlay";
 import { HandPointerControl } from "./HandPointerControl";
 import { handInput } from "./handInput";
@@ -24,6 +24,9 @@ import type { LogoStyle, ParticleBuffers, ParticleSettings } from "./types";
 type ParticleLogoSceneProps = {
   svgText: string;
   svgTextB?: string;
+  svgTexts?: string[];
+  fromIndex?: number;
+  toIndex?: number;
   morphBlend?: number;
   captureClean?: boolean;
   settings: ParticleSettings;
@@ -1907,6 +1910,9 @@ const trailDisplayFragmentShader = `
 export function ParticleLogoScene({
   svgText,
   svgTextB,
+  svgTexts,
+  fromIndex = 0,
+  toIndex = 1,
   morphBlend = 0,
   captureClean = false,
   settings,
@@ -1928,21 +1934,42 @@ export function ParticleLogoScene({
     5600,
     Math.max(1800, Math.round(settings.particleCount * 0.28))
   );
-  const buffers = useMemo(
-    () =>
-      particleMorph ? sampleSvgToParticles(svgText, settings.particleCount, 19) : null,
-    [particleMorph, settings.particleCount, svgText]
+  const clipSvgKey = (svgTexts && svgTexts.length > 0 ? svgTexts : [svgText, svgTextB || svgText]).join(
+    "\u0000"
   );
+  const clipBuffers = useMemo(() => {
+    if (!particleMorph) {
+      return [];
+    }
+    return clipSvgKey.split("\u0000").map((text) => {
+      try {
+        return sampleSvgToParticles(text, settings.particleCount, 19);
+      } catch {
+        return null;
+      }
+    });
+  }, [clipSvgKey, particleMorph, settings.particleCount]);
+  const chainedPositions = useMemo(() => {
+    const sets = clipBuffers
+      .map((item) => item?.positions)
+      .filter((positions): positions is Float32Array => Boolean(positions));
+    return chainMatchPositions(sets);
+  }, [clipBuffers]);
+  const fromClipIndex = Math.min(Math.max(0, fromIndex), Math.max(0, chainedPositions.length - 1));
+  const toClipIndex = Math.min(Math.max(0, toIndex), Math.max(0, chainedPositions.length - 1));
+  const baseBuffers = clipBuffers.find((item) => item) ?? null;
+  const buffers = useMemo(() => {
+    if (!baseBuffers || !chainedPositions[fromClipIndex]) {
+      return null;
+    }
+    return { ...baseBuffers, positions: chainedPositions[fromClipIndex] };
+  }, [baseBuffers, chainedPositions, fromClipIndex]);
   const buffersB = useMemo(() => {
-    if (!particleMorph || !svgTextB || svgTextB === svgText) {
+    if (!baseBuffers || !chainedPositions[toClipIndex]) {
       return null;
     }
-    try {
-      return sampleSvgToParticles(svgTextB, settings.particleCount, 19);
-    } catch {
-      return null;
-    }
-  }, [particleMorph, settings.particleCount, svgText, svgTextB]);
+    return { ...baseBuffers, positions: chainedPositions[toClipIndex] };
+  }, [baseBuffers, chainedPositions, toClipIndex]);
   const asciiBuffers = useMemo(
     () => (asciiStyle ? sampleSvgToParticles(svgNow, asciiParticleCount, 23) : null),
     [asciiParticleCount, asciiStyle, svgNow]
@@ -2002,7 +2029,9 @@ export function ParticleLogoScene({
             />
           ) : sdfStyle ? (
             <SdfBubbleLogo
-              svgText={svgNow}
+              svgText={svgText}
+              svgTextB={svgTextB}
+              morphBlend={morphBlend}
               settings={settings}
               replayNonce={replayNonce}
               paused={paused}
@@ -2025,6 +2054,7 @@ export function ParticleLogoScene({
             />
           ) : null}
         </ResponsiveLogoScale>
+        {sdfStyle && <EnsureCanvasClear />}
         {!sdfStyle && (
         <EffectComposer multisampling={0}>
           <Noise
@@ -2056,6 +2086,9 @@ export function ParticleLogoScene({
         <WebcamWalkersOverlay
           svgText={svgText}
           svgTextB={svgTextB}
+          svgTexts={svgTexts}
+          fromIndex={fromIndex}
+          toIndex={toIndex}
           morphBlend={morphBlend}
           captureClean={captureClean}
           settings={settings}
@@ -2087,6 +2120,15 @@ function getResponsiveLogoScale(width: number, height: number) {
     1,
     Math.max(0.56, Math.min(width / 5.6, height / 5.0))
   );
+}
+
+function EnsureCanvasClear() {
+  useFrame(({ gl }) => {
+    gl.autoClear = true;
+    gl.setClearColor(0x000000, 0);
+    gl.clear(true, true, true);
+  }, -1000);
+  return null;
 }
 
 function ResponsiveLogoScale({ children }: { children: ReactNode }) {
@@ -3163,6 +3205,10 @@ type SdfBubble = {
   role: SdfBubbleRole;
   anchorX: number;
   anchorY: number;
+  ax: number;
+  ay: number;
+  bx: number;
+  by: number;
   /** Drift mode: a stray dot orbiting the silhouette instead of packing it. */
   satellite?: boolean;
 };
@@ -3392,21 +3438,28 @@ function clampSdfBubbleSpeed(bubble: SdfBubble, maxSpeed = SDF_MAX_BUBBLE_SPEED)
 
 function SdfBubbleLogo({
   svgText,
+  svgTextB,
+  morphBlend = 0,
   settings,
   replayNonce,
   paused
 }: {
   svgText: string;
+  svgTextB?: string;
+  morphBlend?: number;
   settings: ParticleSettings;
   replayNonce: number;
   paused: boolean;
 }) {
-  const texture = useSvgMaskTexture(svgText, settings.maskRoughness);
+  const textureA = useSvgMaskTexture(svgText, settings.maskRoughness);
+  const textureB = useSvgMaskTexture(svgTextB || svgText, settings.maskRoughness);
   const runningTime = useRef(0);
   const simulationAccumulator = useRef(0);
   const aquariumEmitters = useRef<THREE.Vector2[]>([]);
   const grabs = useRef(new Map<TrackedHand, { index: number; x: number; y: number; vx: number; vy: number }>());
   const pointerInside = useRef(false);
+  const morphBlendRef = useRef(morphBlend);
+  morphBlendRef.current = morphBlend;
   const { gl } = useThree();
 
   useEffect(() => {
@@ -3425,55 +3478,48 @@ function SdfBubbleLogo({
   const spawnOrigins = useRef<THREE.Vector2[]>([]);
   const simulationKey = useRef("");
 
-  const layout = useMemo(() => {
-    const sampleCount = Math.max(
-      getSdfActiveBubbleCount(settings.particleCount) * 12,
-      Math.round(settings.particleCount / 2),
-      8000
-    );
-    const buffers = sampleSvgToParticles(svgText, sampleCount, 53);
-    const origins: THREE.Vector2[] = [];
+  const layoutA = useMemo(
+    () => sampleSdfLayout(svgText, settings.particleCount),
+    [settings.particleCount, svgText]
+  );
+  const layoutB = useMemo(
+    () => sampleSdfLayout(svgTextB || svgText, settings.particleCount),
+    [settings.particleCount, svgText, svgTextB]
+  );
 
-    let minX = Infinity;
-    let maxX = -Infinity;
-    let minY = Infinity;
-    let maxY = -Infinity;
-
-    for (let index = 0; index < buffers.count; index += 1) {
-      const worldX = buffers.positions[index * 3];
-      const worldY = buffers.positions[index * 3 + 1];
-      const shaderPos = worldToSdfSpace(worldX, worldY);
-      origins.push(shaderPos.clone());
-      minX = Math.min(minX, shaderPos.x);
-      maxX = Math.max(maxX, shaderPos.x);
-      minY = Math.min(minY, shaderPos.y);
-      maxY = Math.max(maxY, shaderPos.y);
-    }
-
-    return {
-      origins,
-      bounds: {
-        minX: minX - 0.02,
-        maxX: maxX + 0.02,
-        minY: minY - 0.02,
-        maxY: maxY + 0.02
-      }
-    };
-  }, [settings.particleCount, svgText]);
-
-  const mask = useMemo(() => {
-    if (!texture?.image) {
+  const maskA = useMemo(() => {
+    if (!textureA?.image) {
       return null;
     }
+    return createSdfMaskSampler(textureA.image as HTMLCanvasElement);
+  }, [textureA]);
+  const maskB = useMemo(() => {
+    if (!textureB?.image) {
+      return null;
+    }
+    return createSdfMaskSampler(textureB.image as HTMLCanvasElement);
+  }, [textureB]);
 
-    return createSdfMaskSampler(texture.image as HTMLCanvasElement);
-  }, [texture]);
+  const bodyPairs = useMemo(() => {
+    const bodyCount = getSdfBodyCount(getSdfActiveBubbleCount(settings.particleCount));
+    const anchorsA = createSdfBodyAnchors(layoutA.origins, bodyCount, maskA);
+    const anchorsB = createSdfBodyAnchors(layoutB.origins, bodyCount, maskB);
+    return matchPointPairs(
+      anchorsA.map((point) => ({ x: point.x, y: point.y })),
+      anchorsB.map((point) => ({ x: point.x, y: point.y }))
+    );
+  }, [layoutA, layoutB, maskA, maskB, settings.particleCount]);
+
+  const emitterPairs = useMemo(() => {
+    const emittersA = maskA ? createAquariumEmitters(layoutA.origins, maskA) : layoutA.origins;
+    const emittersB = maskB ? createAquariumEmitters(layoutB.origins, maskB) : layoutB.origins;
+    return matchPointPairs(
+      emittersA.map((point) => ({ x: point.x, y: point.y })),
+      emittersB.map((point) => ({ x: point.x, y: point.y }))
+    );
+  }, [layoutA, layoutB, maskA, maskB]);
 
   const material = useMemo(() => {
-    if (!texture) {
-      return null;
-    }
-
     const shaderMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uBubbleCount: { value: 0 },
@@ -3495,30 +3541,36 @@ function SdfBubbleLogo({
 
     shaderMaterial.toneMapped = false;
     return shaderMaterial;
-  }, [texture]);
+  }, []);
 
   const resetSimulation = () => {
-    maskSampler.current = mask;
-    spawnOrigins.current = layout.origins.map((origin) => origin.clone());
+    maskSampler.current = maskA;
+    spawnOrigins.current = layoutA.origins.map((origin) => origin.clone());
+    applySdfEmitterMix(aquariumEmitters, emitterPairs, morphBlendRef.current);
 
     const bubbleCount = getSdfActiveBubbleCount(settings.particleCount);
     const nextBubbles: SdfBubble[] = [];
-    const activeMask = maskSampler.current;
-    aquariumEmitters.current = activeMask
-      ? createAquariumEmitters(spawnOrigins.current, activeMask)
-      : spawnOrigins.current;
-    const bodyAnchors = createSdfBodyAnchors(
-      spawnOrigins.current, getSdfBodyCount(bubbleCount), activeMask
-    );
 
     for (let index = 0; index < bubbleCount; index += 1) {
+      const pair = bodyPairs[index] ?? bodyPairs[index % Math.max(1, bodyPairs.length)];
+      const anchor = pair
+        ? new THREE.Vector2(pair.ax, pair.ay)
+        : spawnOrigins.current[index % Math.max(1, spawnOrigins.current.length)];
       const bubble = createSdfBubble(
         index,
         bubbleCount,
         spawnOrigins.current,
         settings,
-        bodyAnchors[index]
+        anchor
       );
+      if (pair) {
+        bubble.ax = pair.ax;
+        bubble.ay = pair.ay;
+        bubble.bx = pair.bx;
+        bubble.by = pair.by;
+        bubble.anchorX = pair.ax;
+        bubble.anchorY = pair.ay;
+      }
       if (settings.sdfMotionMode === "aquarium" && bubble.role === "riser") {
         resetAquariumBubble(bubble, aquariumEmitters.current, settings, true);
       }
@@ -3540,7 +3592,11 @@ function SdfBubbleLogo({
         interaction: 0,
         role: "riser",
         anchorX: 0,
-        anchorY: 0
+        anchorY: 0,
+        ax: 0,
+        ay: 0,
+        bx: 0,
+        by: 0
       });
     }
 
@@ -3551,20 +3607,26 @@ function SdfBubbleLogo({
   };
 
   useEffect(() => {
-    if (!mask) {
-      return;
-    }
-
-    const nextKey = `${svgText}:${replayNonce}:${settings.particleCount}:${settings.pointSize}:${settings.sdfMotionMode}`;
+    const nextKey = `${replayNonce}:${settings.particleCount}:${settings.pointSize}:${settings.sdfMotionMode}`;
     if (simulationKey.current === nextKey && bubbles.current.length > 0) {
-      maskSampler.current = mask;
-      aquariumEmitters.current = createAquariumEmitters(spawnOrigins.current, mask);
+      maskSampler.current = maskA;
+      applySdfAnchorPairs(bubbles.current, bodyPairs);
+      applySdfEmitterMix(aquariumEmitters, emitterPairs, morphBlendRef.current);
       return;
     }
 
     simulationKey.current = nextKey;
     resetSimulation();
-  }, [layout, mask, replayNonce, settings.particleCount, settings.pointSize, settings.sdfMotionMode, svgText]);
+  }, [
+    bodyPairs,
+    emitterPairs,
+    layoutA,
+    maskA,
+    replayNonce,
+    settings.particleCount,
+    settings.pointSize,
+    settings.sdfMotionMode
+  ]);
 
   useEffect(() => {
     return () => {
@@ -3577,6 +3639,16 @@ function SdfBubbleLogo({
 
     const frameDt = Math.min(delta, 0.05);
     const bubbleCount = getSdfActiveBubbleCount(settings.particleCount);
+    const blend = morphBlendRef.current;
+    applySdfEmitterMix(aquariumEmitters, emitterPairs, blend);
+    for (let index = 0; index < bubbleCount; index += 1) {
+      const bubble = bubbles.current[index];
+      if (bubble.role !== "body") {
+        continue;
+      }
+      bubble.anchorX = bubble.ax + (bubble.bx - bubble.ax) * blend;
+      bubble.anchorY = bubble.ay + (bubble.by - bubble.ay) * blend;
+    }
     const aquarium = settings.sdfMotionMode === "aquarium";
     const handView = settings.handControl && handInput.active &&
       handInput.width > 1 && handInput.height > 1 ? handInput : null;
@@ -3754,6 +3826,9 @@ function SdfBubbleLogo({
       );
       uniforms[index].set(bubble.pos.x, bubble.pos.y, bubble.radius, bubble.opacity * edgeFade);
     }
+    for (let index = bubbleCount; index < SDF_BUBBLE_MAX; index += 1) {
+      uniforms[index].set(0, 0, 0, 0);
+    }
     material.uniforms.uBubbleCount.value = bubbleCount;
     material.uniforms.uFlicker.value = settings.flicker;
     material.uniforms.uColorPrimary.value.set(settings.particleColor);
@@ -3761,19 +3836,65 @@ function SdfBubbleLogo({
     material.uniforms.uColorHighlight.value.set(settings.particleHighlightColor);
   });
 
-  if (!material) {
-    return null;
-  }
-
   return (
     <mesh
       material={material}
       scale={[SURFACE_PLANE_WORLD_SIZE, SURFACE_PLANE_WORLD_SIZE, 1]}
       frustumCulled={false}
+      onBeforeRender={(renderer) => {
+        renderer.setClearColor(0x000000, 0);
+        renderer.clear(true, true, true);
+      }}
     >
       <planeGeometry args={[1, 1]} />
     </mesh>
   );
+}
+
+function sampleSdfLayout(svgText: string, particleCount: number) {
+  const sampleCount = Math.max(
+    getSdfActiveBubbleCount(particleCount) * 12,
+    Math.round(particleCount / 2),
+    8000
+  );
+  try {
+    const buffers = sampleSvgToParticles(svgText, sampleCount, 53);
+    const origins: THREE.Vector2[] = [];
+    for (let index = 0; index < buffers.count; index += 1) {
+      origins.push(worldToSdfSpace(buffers.positions[index * 3], buffers.positions[index * 3 + 1]));
+    }
+    return { origins };
+  } catch {
+    return { origins: [] as THREE.Vector2[] };
+  }
+}
+
+function applySdfAnchorPairs(bubbles: SdfBubble[], pairs: ReturnType<typeof matchPointPairs>) {
+  if (pairs.length === 0) {
+    return;
+  }
+  for (let index = 0; index < bubbles.length; index += 1) {
+    const bubble = bubbles[index];
+    if (bubble.role !== "body") {
+      continue;
+    }
+    const pair = pairs[index] ?? pairs[index % pairs.length];
+    bubble.ax = pair.ax;
+    bubble.ay = pair.ay;
+    bubble.bx = pair.bx;
+    bubble.by = pair.by;
+  }
+}
+
+function applySdfEmitterMix(
+  emitters: { current: THREE.Vector2[] },
+  pairs: ReturnType<typeof matchPointPairs>,
+  blend: number
+) {
+  const next: THREE.Vector2[] = pairs.map((pair) =>
+    new THREE.Vector2(pair.ax + (pair.bx - pair.ax) * blend, pair.ay + (pair.by - pair.ay) * blend)
+  );
+  emitters.current = next.length > 0 ? next : emitters.current;
 }
 
 function createSdfBubble(
@@ -3811,6 +3932,10 @@ function createSdfBubble(
     role,
     anchorX: pos.x,
     anchorY: pos.y,
+    ax: pos.x,
+    ay: pos.y,
+    bx: pos.x,
+    by: pos.y,
     satellite
   };
 }
@@ -5044,9 +5169,7 @@ function ParticleCloud({
 
   const geometry = useMemo(() => {
     const nextGeometry = new THREE.BufferGeometry();
-    const targetB = buffersB
-      ? alignTargetPositions(buffers.positions, buffersB.positions)
-      : buffers.positions;
+    const targetB = buffersB?.positions ?? buffers.positions;
     nextGeometry.setAttribute("position", new THREE.BufferAttribute(buffers.positions, 3));
     nextGeometry.setAttribute("aTargetB", new THREE.BufferAttribute(targetB, 3));
     nextGeometry.setAttribute("aOrigin", new THREE.BufferAttribute(buffers.origins, 3));

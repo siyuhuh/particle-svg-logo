@@ -19,14 +19,169 @@ export type TimelineSpec = {
   holdB: number;
 };
 
+export type TimelineClipTiming = {
+  hold: number;
+  morph: number;
+};
+
+export type TimelineSegment = {
+  kind: "hold" | "morph";
+  from: number;
+  to: number;
+  start: number;
+  duration: number;
+};
+
+export const DEFAULT_CLIP_HOLD = 2.6;
+export const DEFAULT_CLIP_MORPH = 3.2;
+export const MIN_CLIP_HOLD = 0.4;
+export const MAX_CLIP_HOLD = 12;
+export const MIN_CLIP_MORPH = 0.4;
+export const MAX_CLIP_MORPH = 12;
+export const MAX_TIMELINE_CLIPS = 8;
+
 export const DEFAULT_TIMELINE: TimelineSpec = {
-  holdA: 1.4,
-  morph: 4.2,
+  holdA: DEFAULT_CLIP_HOLD,
+  morph: DEFAULT_CLIP_MORPH,
   holdB: 1.6
 };
 
 export function timelineDuration(spec: TimelineSpec) {
   return spec.holdA + spec.morph + spec.holdB;
+}
+
+export function clipLetter(index: number) {
+  return String.fromCharCode(65 + (index % 26));
+}
+
+export function buildTimelineSegments(
+  clips: TimelineClipTiming[],
+  loop: boolean
+): { segments: TimelineSegment[]; duration: number } {
+  const segments: TimelineSegment[] = [];
+  let time = 0;
+  for (let index = 0; index < clips.length; index += 1) {
+    const clip = clips[index];
+    segments.push({
+      kind: "hold",
+      from: index,
+      to: index,
+      start: time,
+      duration: Math.max(MIN_CLIP_HOLD, clip.hold)
+    });
+    time += Math.max(MIN_CLIP_HOLD, clip.hold);
+    const hasNext = index + 1 < clips.length;
+    const morph = Math.max(MIN_CLIP_MORPH, clip.morph);
+    if (morph > 0 && (hasNext || (loop && clips.length > 1))) {
+      segments.push({
+        kind: "morph",
+        from: index,
+        to: hasNext ? index + 1 : 0,
+        start: time,
+        duration: morph
+      });
+      time += morph;
+    }
+  }
+  return { segments, duration: Math.max(0.2, time) };
+}
+
+export function sampleTimeline(
+  time: number,
+  clips: TimelineClipTiming[],
+  loop: boolean
+) {
+  const { segments, duration } = buildTimelineSegments(clips, loop);
+  if (clips.length === 0) {
+    return { fromIndex: 0, toIndex: 0, clipIndex: 0, blend: 0, duration: 0 };
+  }
+  let t = time;
+  if (loop && duration > 0) {
+    t = ((t % duration) + duration) % duration;
+  } else {
+    t = Math.min(duration, Math.max(0, t));
+  }
+  const last = segments[segments.length - 1];
+  const segment =
+    segments.find((item) => t < item.start + item.duration - 0.0001) ?? last;
+  if (!segment) {
+    return { fromIndex: 0, toIndex: 0, clipIndex: 0, blend: 0, duration };
+  }
+  const local = segment.duration <= 0 ? 1 : (t - segment.start) / segment.duration;
+  const eased = easeInOutCubic(clamp01(local));
+  const clipIndex = segment.from;
+
+  // Two logos ping-pong on one A/B pairing so the formed shape never rematches
+  // on hold, and the return trip eases blend 1 → 0 instead of rebuilding homes.
+  if (clips.length === 2) {
+    if (segment.kind === "hold") {
+      return {
+        fromIndex: 0,
+        toIndex: 1,
+        clipIndex,
+        blend: segment.from === 0 ? 0 : 1,
+        duration
+      };
+    }
+    if (segment.from === 1 && segment.to === 0) {
+      return {
+        fromIndex: 0,
+        toIndex: 1,
+        clipIndex,
+        blend: easeInOutCubic(1 - clamp01(local)),
+        duration
+      };
+    }
+    return { fromIndex: 0, toIndex: 1, clipIndex, blend: eased, duration };
+  }
+
+  if (segment.kind === "hold") {
+    const incoming = segments.find((item) => item.kind === "morph" && item.to === segment.from);
+    const outgoing = segments.find((item) => item.kind === "morph" && item.from === segment.from);
+    const atCycleStart = segment.start === 0;
+    if (incoming && !atCycleStart) {
+      return {
+        fromIndex: incoming.from,
+        toIndex: incoming.to,
+        clipIndex,
+        blend: 1,
+        duration
+      };
+    }
+    if (outgoing) {
+      return {
+        fromIndex: outgoing.from,
+        toIndex: outgoing.to,
+        clipIndex,
+        blend: 0,
+        duration
+      };
+    }
+    return { fromIndex: segment.from, toIndex: segment.from, clipIndex, blend: 0, duration };
+  }
+
+  return {
+    fromIndex: segment.from,
+    toIndex: segment.to,
+    clipIndex,
+    blend: eased,
+    duration
+  };
+}
+
+export function clipHoldStart(clips: TimelineClipTiming[], index: number, loop: boolean) {
+  const { segments } = buildTimelineSegments(clips, loop);
+  return segments.find((segment) => segment.kind === "hold" && segment.from === index)?.start ?? 0;
+}
+
+export function matchPointPairs(
+  a: Array<{ x: number; y: number }>,
+  b: Array<{ x: number; y: number }>
+): MatchedHome[] {
+  return matchLogoHomes(
+    a.map((point) => ({ nx: point.x, ny: point.y })),
+    b.map((point) => ({ nx: point.x, ny: point.y }))
+  );
 }
 
 export function easeInOutCubic(t: number) {
@@ -68,6 +223,30 @@ export function sampleWalkerHomes(svgText: string, particleCount: number): LogoP
   } catch {
     return [];
   }
+}
+
+export function chainMatchPointSets(sets: LogoPoint[][]): LogoPoint[][] {
+  if (sets.length === 0) {
+    return [];
+  }
+  const n = Math.max(1, ...sets.map((set) => set.length));
+  const padded = sets.map((set) => padPoints(set, n));
+  const homes: LogoPoint[][] = [padded[0]];
+  for (let i = 1; i < padded.length; i += 1) {
+    homes.push(nearestAssign(homes[i - 1], padded[i]));
+  }
+  return homes;
+}
+
+export function chainMatchPositions(sets: Float32Array[]): Float32Array[] {
+  if (sets.length === 0) {
+    return [];
+  }
+  const homes: Float32Array[] = [sets[0]];
+  for (let i = 1; i < sets.length; i += 1) {
+    homes.push(alignTargetPositions(homes[i - 1], sets[i]));
+  }
+  return homes;
 }
 
 export function matchLogoHomes(a: LogoPoint[], b: LogoPoint[]): MatchedHome[] {

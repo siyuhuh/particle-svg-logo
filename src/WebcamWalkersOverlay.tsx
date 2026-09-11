@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useRef } from "react";
-import { matchLogoHomes, sampleWalkerHomes } from "./logoMorph";
+import { chainMatchPointSets, sampleWalkerHomes } from "./logoMorph";
 import { useHandTracking, type TrackedHand } from "./useHandTracking";
 import type { ParticleSettings } from "./types";
 
 type WebcamWalkersOverlayProps = {
   svgText: string;
   svgTextB?: string;
+  svgTexts?: string[];
+  fromIndex?: number;
+  toIndex?: number;
   morphBlend?: number;
   captureClean?: boolean;
   settings: ParticleSettings;
@@ -193,11 +196,6 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
-function smoothstep(edge0: number, edge1: number, x: number) {
-  const t = clamp((x - edge0) / Math.max(0.0001, edge1 - edge0), 0, 1);
-  return t * t * (3 - 2 * t);
-}
-
 // Cheap deterministic hash in [0,1) from a seed.
 function hash(n: number) {
   const s = Math.sin(n * 12.9898) * 43758.5453;
@@ -216,6 +214,9 @@ function snoise(t: number, seed: number) {
 export function WebcamWalkersOverlay({
   svgText,
   svgTextB,
+  svgTexts,
+  fromIndex = 0,
+  toIndex = 1,
   morphBlend = 0,
   captureClean = false,
   settings,
@@ -241,15 +242,25 @@ export function WebcamWalkersOverlay({
     [settings.particleColor, settings.particleAccentColor, settings.particleHighlightColor]
   );
 
-  // Sample both logos onto an EVEN GRID so the crowd covers each shape uniformly,
-  // then pair homes so people take short walks from A to B.
+  const clipSvgKey = (svgTexts && svgTexts.length > 0 ? svgTexts : [svgText, svgTextB || svgText]).join(
+    "\u0000"
+  );
   const homes = useMemo(() => {
-    const pointsA = sampleWalkerHomes(svgText, settings.particleCount);
-    const pointsB = svgTextB && svgTextB !== svgText
-      ? sampleWalkerHomes(svgTextB, settings.particleCount)
-      : pointsA;
-    return matchLogoHomes(pointsA, pointsB.length > 0 ? pointsB : pointsA);
-  }, [svgText, svgTextB, settings.particleCount]);
+    const texts = clipSvgKey.split("\u0000");
+    const chained = chainMatchPointSets(
+      texts.map((text) => sampleWalkerHomes(text, settings.particleCount))
+    );
+    const last = Math.max(0, chained.length - 1);
+    const from = chained[Math.min(fromIndex, last)] ?? [];
+    const to = chained[Math.min(toIndex, last)] ?? from;
+    const count = Math.max(from.length, to.length);
+    return Array.from({ length: count }, (_, index) => ({
+      ax: from[index]?.nx ?? 0.5,
+      ay: from[index]?.ny ?? 0.5,
+      bx: to[index]?.nx ?? from[index]?.nx ?? 0.5,
+      by: to[index]?.ny ?? from[index]?.ny ?? 0.5
+    }));
+  }, [clipSvgKey, fromIndex, settings.particleCount, toIndex]);
 
   // Latest props available to the rAF loop without restarting it.
   const settingsRef = useRef(settings);
@@ -604,24 +615,30 @@ export function WebcamWalkersOverlay({
         }
       }
 
+      for (let i = 0; i < walkers.length; i += 1) {
+        const wkr = walkers[i];
+        const prevHx = wkr.hx;
+        const prevHy = wkr.hy;
+        const blend = morphBlendRef.current;
+        wkr.nx = wkr.ax + (wkr.bx - wkr.ax) * blend;
+        wkr.ny = wkr.ay + (wkr.by - wkr.ay) * blend;
+        wkr.hx = ox + wkr.nx * fit;
+        wkr.hy = oy + wkr.ny * fit;
+        if (!wkr.placed && cssW > 2) {
+          wkr.x = wkr.hx + (Math.random() - 0.5) * fit * 0.05;
+          wkr.y = wkr.hy + (Math.random() - 0.5) * fit * 0.05;
+          wkr.vx = 0;
+          wkr.vy = 0;
+          wkr.placed = true;
+        } else {
+          wkr.x += wkr.hx - prevHx;
+          wkr.y += wkr.hy - prevHy;
+        }
+      }
+
       if (!pausedRef.current) {
         for (let i = 0; i < walkers.length; i += 1) {
           const wkr = walkers[i];
-          const delay = hash(wkr.wSeed + 3) * 0.28;
-          const blend = smoothstep(delay, 0.78 + delay * 0.18, morphBlendRef.current);
-          wkr.nx = wkr.ax + (wkr.bx - wkr.ax) * blend;
-          wkr.ny = wkr.ay + (wkr.by - wkr.ay) * blend;
-          wkr.hx = ox + wkr.nx * fit;
-          wkr.hy = oy + wkr.ny * fit;
-          // Place fresh walkers on the logo once we have real bounds (>1px) → the
-          // shape reads instantly instead of walking in from a stale spawn point.
-          if (!wkr.placed && cssW > 2) {
-            wkr.x = wkr.hx + (Math.random() - 0.5) * fit * 0.05;
-            wkr.y = wkr.hy + (Math.random() - 0.5) * fit * 0.05;
-            wkr.vx = 0;
-            wkr.vy = 0;
-            wkr.placed = true;
-          }
           wkr.held = false;
 
           // Carried by a pinch: hang from the fingers, legs scrambling in the air.

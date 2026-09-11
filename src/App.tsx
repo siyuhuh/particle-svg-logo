@@ -39,11 +39,18 @@ import {
   resolveLogoStyleFromSlug
 } from "./effectsCatalog";
 import {
-  DEFAULT_TIMELINE,
-  timeToMorphBlend,
-  timelineDuration,
-  type TimelineSpec
+  DEFAULT_CLIP_HOLD,
+  DEFAULT_CLIP_MORPH,
+  MAX_CLIP_HOLD,
+  MAX_CLIP_MORPH,
+  MAX_TIMELINE_CLIPS,
+  MIN_CLIP_HOLD,
+  MIN_CLIP_MORPH,
+  clipHoldStart,
+  clipLetter,
+  sampleTimeline
 } from "./logoMorph";
+import { MorphTimelineBar, type TimelineClip } from "./MorphTimelineBar";
 import { ParticleLogoScene } from "./ParticleLogoScene";
 import { getRecommendedParticleCount, sampleSvgToParticles } from "./svgSampler";
 import { sanitizeSvgText } from "./svgSanitize";
@@ -600,7 +607,6 @@ const DRAW_MIN_DISTANCE = 1.6;
 
 type SourceMode = "markup" | "draw";
 type DrawTool = "brush" | "pen" | "line" | "rect" | "ellipse";
-type LogoSlot = "a" | "b";
 type DrawPoint = {
   x: number;
   y: number;
@@ -670,6 +676,15 @@ function copyTextWithFallback(text: string) {
   }
 }
 
+function createTimelineClip(source: LogoSource, hold = DEFAULT_CLIP_HOLD, morph = DEFAULT_CLIP_MORPH): TimelineClip {
+  return {
+    id: `clip-${Math.random().toString(36).slice(2, 9)}`,
+    source,
+    hold,
+    morph
+  };
+}
+
 export default function App() {
   const [logoStyle, setLogoStyle] = useState<LogoStyle>(readLogoStyleFromUrl);
   const [settingsByStyle, setSettingsByStyle] =
@@ -677,18 +692,11 @@ export default function App() {
   const [draftSvg, setDraftSvg] = useState(DEFAULT_SVG);
   const [draftName, setDraftName] = useState("whothree.svg");
   const [sourceMode, setSourceMode] = useState<SourceMode>("markup");
-  const [activeSlot, setActiveSlot] = useState<LogoSlot>("a");
-  const [logoA, setLogoA] = useState<LogoSource>({
-    kind: "paste",
-    name: "whothree.svg",
-    svgText: DEFAULT_SVG
-  });
-  const [logoB, setLogoB] = useState<LogoSource>({
-    kind: "paste",
-    name: "mark.svg",
-    svgText: DEFAULT_SVG_B
-  });
-  const [timelineSpec, setTimelineSpec] = useState<TimelineSpec>(DEFAULT_TIMELINE);
+  const [clips, setClips] = useState<TimelineClip[]>(() => [
+    createTimelineClip({ kind: "paste", name: "whothree.svg", svgText: DEFAULT_SVG }),
+    createTimelineClip({ kind: "paste", name: "mark.svg", svgText: DEFAULT_SVG_B })
+  ]);
+  const [activeClipId, setActiveClipId] = useState("");
   const [timelineTime, setTimelineTime] = useState(0);
   const [timelinePlaying, setTimelinePlaying] = useState(true);
   const [timelineLoop, setTimelineLoop] = useState(true);
@@ -719,9 +727,8 @@ export default function App() {
   const timelinePlayingRef = useRef(false);
   const timelineTimeRef = useRef(0);
   const timelineLoopRef = useRef(true);
-  const timelineDirRef = useRef(1);
   const recordingRef = useRef(false);
-  const durationRef = useRef(timelineDuration(DEFAULT_TIMELINE));
+  const durationRef = useRef(1);
   const activePointerId = useRef<number | null>(null);
   const currentBrushStrokeRef = useRef<DrawPoint[]>([]);
   const currentShapeStrokeRef = useRef<ShapeStroke | null>(null);
@@ -739,8 +746,29 @@ export default function App() {
     [logoStyle, settingsByStyle]
   );
   const preview = useMemo(() => sanitizeSvgText(draftSvg), [draftSvg]);
-  const previewA = useMemo(() => sanitizeSvgText(logoA.svgText), [logoA.svgText]);
-  const previewB = useMemo(() => sanitizeSvgText(logoB.svgText), [logoB.svgText]);
+  const clipPreviews = useMemo(() => {
+    const next: Record<string, string> = {};
+    for (const clip of clips) {
+      const sanitized = sanitizeSvgText(clip.source.svgText);
+      if (sanitized.ok) {
+        next[clip.id] = sanitized.svgText;
+      }
+    }
+    return next;
+  }, [clips]);
+  const activeClip = clips.find((clip) => clip.id === activeClipId) ?? clips[0];
+  const clipSvgTexts = useMemo(
+    () => clips.map((clip) => clip.source.svgText),
+    [clips]
+  );
+  const timelineSample = useMemo(
+    () => sampleTimeline(timelineTime, clips, timelineLoop),
+    [clips, timelineLoop, timelineTime]
+  );
+  const morphDuration = timelineSample.duration;
+  const fromClip = clips[timelineSample.fromIndex] ?? clips[0];
+  const toClip = clips[timelineSample.toIndex] ?? fromClip;
+  const morphBlend = timelineSample.blend;
   const visibleDrawStrokes = useMemo(
     () => [
       ...drawStrokes,
@@ -766,8 +794,6 @@ export default function App() {
   const visibleLogoStyles = useMemo(() => getVisibleLogoStyles(), []);
   const activeStyle = LOGO_STYLES.find((style) => style.id === settings.logoStyle) ?? LOGO_STYLES[0];
   const activeStyleIsDev = visibleLogoStyles.find((style) => style.id === settings.logoStyle)?.devOnly ?? false;
-  const morphDuration = timelineDuration(timelineSpec);
-  const morphBlend = timeToMorphBlend(timelineTime, timelineSpec);
 
   timelinePlayingRef.current = timelinePlaying;
   timelineTimeRef.current = timelineTime;
@@ -851,11 +877,13 @@ export default function App() {
           name: "Live drawing",
           svgText: sanitized.svgText
         };
-        if (activeSlot === "b") {
-          setLogoB(liveSource);
-        } else {
-          setLogoA(liveSource);
-        }
+        setClips((current) =>
+          current.map((clip) =>
+            clip.id === (activeClip?.id ?? current[0]?.id)
+              ? { ...clip, source: liveSource }
+              : clip
+          )
+        );
         setInputError(null);
         setReplayNonce((value) => value + 1);
       } catch {
@@ -868,7 +896,7 @@ export default function App() {
         window.clearTimeout(drawCommitTimerRef.current);
       }
     };
-  }, [activeSlot, committedDrawingSvg, drawStrokes.length, settings.particleCount, sourceMode]);
+  }, [activeClip?.id, committedDrawingSvg, drawStrokes.length, settings.particleCount, sourceMode]);
 
   const updateSetting = <Key extends keyof ParticleSettings>(
     key: Key,
@@ -935,11 +963,13 @@ export default function App() {
         name: source.name || "Pasted SVG",
         svgText: sanitized.svgText
       };
-      if (activeSlot === "b") {
-        setLogoB(nextSource);
-      } else {
-        setLogoA(nextSource);
-      }
+      setClips((current) =>
+        current.map((clip) =>
+          clip.id === (activeClip?.id ?? current[0]?.id)
+            ? { ...clip, source: nextSource }
+            : clip
+        )
+      );
       setDraftSvg(sanitized.svgText);
       setInputError(null);
       setIsPaused(false);
@@ -991,16 +1021,14 @@ export default function App() {
   const handleCopyEffectJson = async () => {
     const payload = {
       version: 1,
-      sourceA: {
-        kind: logoA.kind,
-        name: logoA.name,
-        svgText: logoA.svgText
-      },
-      sourceB: {
-        kind: logoB.kind,
-        name: logoB.name,
-        svgText: logoB.svgText
-      },
+      clips: clips.map((clip, index) => ({
+        letter: clipLetter(index),
+        kind: clip.source.kind,
+        name: clip.source.name,
+        svgText: clip.source.svgText,
+        hold: clip.hold,
+        morph: clip.morph
+      })),
       effect: settings
     };
     const jsonText = JSON.stringify(payload, null, 2);
@@ -1028,19 +1056,81 @@ export default function App() {
     }, 1400);
   };
 
-  const selectLogoSlot = (slot: LogoSlot) => {
-    const source = slot === "a" ? logoA : logoB;
-    setActiveSlot(slot);
-    setDraftSvg(source.svgText);
-    setDraftName(source.name || "");
+  const selectClip = (id: string, seek = true) => {
+    const clip = clips.find((item) => item.id === id);
+    if (!clip) {
+      return;
+    }
+    setActiveClipId(id);
+    setDraftSvg(clip.source.svgText);
+    setDraftName(clip.source.name || "");
     setSourceMode("markup");
     setInputError(null);
+    if (seek) {
+      const start = clipHoldStart(clips, clips.findIndex((item) => item.id === id), timelineLoop);
+      timelineTimeRef.current = start;
+      setTimelineTime(start);
+    }
+  };
+
+  const addClip = () => {
+    if (clips.length >= MAX_TIMELINE_CLIPS) {
+      return;
+    }
+    const source: LogoSource = activeClip
+      ? { ...activeClip.source, name: `${activeClip.source.name || "logo"}-${clipLetter(clips.length)}` }
+      : { kind: "paste", name: "logo.svg", svgText: DEFAULT_SVG };
+    const next = createTimelineClip(source);
+    setClips((current) => [...current, next]);
+    setActiveClipId(next.id);
+    setDraftSvg(next.source.svgText);
+    setDraftName(next.source.name || "");
+  };
+
+  const removeClip = (id: string) => {
+    if (clips.length <= 2) {
+      return;
+    }
+    const index = clips.findIndex((clip) => clip.id === id);
+    const nextClips = clips.filter((clip) => clip.id !== id);
+    setClips(nextClips);
+    const fallback = nextClips[Math.max(0, index - 1)] ?? nextClips[0];
+    if (fallback) {
+      selectClip(fallback.id, false);
+    }
+  };
+
+  const updateClipTiming = (id: string, patch: Partial<Pick<TimelineClip, "hold" | "morph">>) => {
+    setClips((current) =>
+      current.map((clip) => {
+        if (clip.id !== id) {
+          return clip;
+        }
+        return {
+          ...clip,
+          hold:
+            patch.hold == null
+              ? clip.hold
+              : clamp(patch.hold, MIN_CLIP_HOLD, MAX_CLIP_HOLD),
+          morph:
+            patch.morph == null
+              ? clip.morph
+              : clamp(patch.morph, MIN_CLIP_MORPH, MAX_CLIP_MORPH)
+        };
+      })
+    );
+  };
+
+  const updateActiveClipTiming = (patch: Partial<Pick<TimelineClip, "hold" | "morph">>) => {
+    if (!activeClip) {
+      return;
+    }
+    updateClipTiming(activeClip.id, patch);
   };
 
   const playTimeline = (fromStart = false) => {
     setIsPaused(false);
     if (fromStart || timelineTimeRef.current >= durationRef.current - 0.02) {
-      timelineDirRef.current = 1;
       timelineTimeRef.current = 0;
       setTimelineTime(0);
     }
@@ -1061,7 +1151,6 @@ export default function App() {
     setRecording(true);
     setIsPaused(false);
     setTimelinePlaying(false);
-    timelineDirRef.current = 1;
     timelineTimeRef.current = 0;
     setTimelineTime(0);
     await new Promise<void>((resolve) => {
@@ -1080,7 +1169,6 @@ export default function App() {
       recordingRef.current = false;
       setRecording(false);
       if (timelineLoopRef.current) {
-        timelineDirRef.current = 1;
         setTimelinePlaying(true);
       } else {
         setTimelinePlaying(false);
@@ -1098,11 +1186,10 @@ export default function App() {
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
       const duration = durationRef.current;
-      let next = timelineTimeRef.current + dt * timelineDirRef.current;
+      let next = timelineTimeRef.current + dt;
       if (next >= duration) {
         if (timelineLoopRef.current && !recordingRef.current) {
-          timelineDirRef.current = -1;
-          next = duration;
+          next = next % duration;
         } else {
           next = duration;
           timelineTimeRef.current = next;
@@ -1110,9 +1197,6 @@ export default function App() {
           setTimelinePlaying(false);
           return;
         }
-      } else if (next <= 0) {
-        timelineDirRef.current = 1;
-        next = 0;
       }
       timelineTimeRef.current = next;
       setTimelineTime(next);
@@ -1388,7 +1472,7 @@ export default function App() {
           <div>
             <h1>Particle SVG Logo</h1>
             <p>
-              {logoA.name || "Logo A"} → {logoB.name || "Logo B"}
+              {clips.map((clip, index) => clipLetter(index)).join(" → ")}
             </p>
           </div>
         </header>
@@ -1400,44 +1484,31 @@ export default function App() {
           </div>
 
           <div className="logo-slots" role="tablist" aria-label="Logo morph targets">
-            <button
-              className={`logo-slot ${activeSlot === "a" ? "active" : ""}`}
-              type="button"
-              role="tab"
-              aria-selected={activeSlot === "a"}
-              onClick={() => selectLogoSlot("a")}
-            >
-              <span className="logo-slot-preview" aria-hidden="true">
-                {previewA.ok ? (
-                  <span dangerouslySetInnerHTML={{ __html: previewA.svgText }} />
-                ) : (
-                  "A"
-                )}
-              </span>
-              <span className="logo-slot-copy">
-                <strong>Logo A</strong>
-                <small>{logoA.name || "Start"}</small>
-              </span>
-            </button>
-            <button
-              className={`logo-slot ${activeSlot === "b" ? "active" : ""}`}
-              type="button"
-              role="tab"
-              aria-selected={activeSlot === "b"}
-              onClick={() => selectLogoSlot("b")}
-            >
-              <span className="logo-slot-preview" aria-hidden="true">
-                {previewB.ok ? (
-                  <span dangerouslySetInnerHTML={{ __html: previewB.svgText }} />
-                ) : (
-                  "B"
-                )}
-              </span>
-              <span className="logo-slot-copy">
-                <strong>Logo B</strong>
-                <small>{logoB.name || "End"}</small>
-              </span>
-            </button>
+            {clips.map((clip, index) => {
+              const previewSvg = clipPreviews[clip.id];
+              return (
+                <button
+                  key={clip.id}
+                  className={`logo-slot ${activeClip?.id === clip.id ? "active" : ""}`}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeClip?.id === clip.id}
+                  onClick={() => selectClip(clip.id)}
+                >
+                  <span className="logo-slot-preview" aria-hidden="true">
+                    {previewSvg ? (
+                      <span dangerouslySetInnerHTML={{ __html: previewSvg }} />
+                    ) : (
+                      clipLetter(index)
+                    )}
+                  </span>
+                  <span className="logo-slot-copy">
+                    <strong>Logo {clipLetter(index)}</strong>
+                    <small>{clip.source.name || "SVG"}</small>
+                  </span>
+                </button>
+              );
+            })}
           </div>
 
           <div className="source-tabs" role="tablist" aria-label="SVG input mode">
@@ -1473,7 +1544,7 @@ export default function App() {
             </button>
             <button className="button primary" onClick={handleApply} disabled={!preview.ok}>
               <Play size={14} />
-              Apply {activeSlot === "b" ? "B" : "A"}
+              Apply {activeClip ? clipLetter(clips.findIndex((clip) => clip.id === activeClip.id)) : "A"}
             </button>
             <button
               className="icon-button"
@@ -1727,31 +1798,22 @@ export default function App() {
             <span>Logo morph</span>
           </div>
           <SliderControl
-            label="Hold A"
-            value={timelineSpec.holdA}
-            min={0.4}
-            max={4}
+            label={`Hold ${activeClip ? clipLetter(clips.findIndex((clip) => clip.id === activeClip.id)) : "A"}`}
+            value={activeClip?.hold ?? DEFAULT_CLIP_HOLD}
+            min={MIN_CLIP_HOLD}
+            max={MAX_CLIP_HOLD}
             step={0.1}
             format={(value) => `${value.toFixed(1)}s`}
-            onChange={(value) => setTimelineSpec((current) => ({ ...current, holdA: value }))}
+            onChange={(value) => updateActiveClipTiming({ hold: value })}
           />
           <SliderControl
-            label="Morph"
-            value={timelineSpec.morph}
-            min={1}
-            max={10}
+            label="Morph to next"
+            value={activeClip?.morph ?? DEFAULT_CLIP_MORPH}
+            min={MIN_CLIP_MORPH}
+            max={MAX_CLIP_MORPH}
             step={0.1}
             format={(value) => `${value.toFixed(1)}s`}
-            onChange={(value) => setTimelineSpec((current) => ({ ...current, morph: value }))}
-          />
-          <SliderControl
-            label="Hold B"
-            value={timelineSpec.holdB}
-            min={0.4}
-            max={4}
-            step={0.1}
-            format={(value) => `${value.toFixed(1)}s`}
-            onChange={(value) => setTimelineSpec((current) => ({ ...current, holdB: value }))}
+            onChange={(value) => updateActiveClipTiming({ morph: value })}
           />
           <label className="toggle-row">
             <input
@@ -1759,7 +1821,7 @@ export default function App() {
               checked={timelineLoop}
               onChange={(event) => setTimelineLoop(event.target.checked)}
             />
-            Loop A ↔ B
+            Loop sequence
           </label>
           <div className="source-actions morph-actions">
             <button
@@ -3583,8 +3645,11 @@ export default function App() {
 
       <main ref={stageRef} className="stage" aria-label="Particle logo preview">
         <ParticleLogoScene
-          svgText={logoA.svgText}
-          svgTextB={logoB.svgText}
+          svgText={fromClip?.source.svgText ?? DEFAULT_SVG}
+          svgTextB={toClip?.source.svgText ?? fromClip?.source.svgText}
+          svgTexts={clipSvgTexts}
+          fromIndex={timelineSample.fromIndex}
+          toIndex={timelineSample.toIndex}
           morphBlend={morphBlend}
           captureClean={recording}
           settings={settings}
@@ -3647,36 +3712,24 @@ export default function App() {
           </button>
         </div>
 
-        <div className="stage-timeline" aria-label="Logo morph timeline">
-          <span className="timeline-end">A</span>
-          <label className="timeline-track">
-            <span className="visually-hidden">Morph time</span>
-            <span
-              className="timeline-morph-window"
-              style={{
-                left: `${(timelineSpec.holdA / Math.max(0.001, morphDuration)) * 100}%`,
-                width: `${(timelineSpec.morph / Math.max(0.001, morphDuration)) * 100}%`
-              }}
-            />
-            <input
-              type="range"
-              min={0}
-              max={morphDuration}
-              step={0.01}
-              value={timelineTime}
-              onChange={(event) => {
-                setTimelinePlaying(false);
-                const next = Number(event.target.value);
-                timelineTimeRef.current = next;
-                setTimelineTime(next);
-              }}
-            />
-          </label>
-          <span className="timeline-end">B</span>
-          <span className="timeline-time">
-            {timelineTime.toFixed(1)} / {morphDuration.toFixed(1)}s
-          </span>
-        </div>
+        <MorphTimelineBar
+          clips={clips}
+          selectedId={activeClip?.id ?? clips[0]?.id ?? ""}
+          time={timelineTime}
+          duration={morphDuration}
+          playing={timelinePlaying}
+          loop={timelineLoop}
+          previews={clipPreviews}
+          onSeek={(next) => {
+            setTimelinePlaying(false);
+            timelineTimeRef.current = next;
+            setTimelineTime(next);
+          }}
+          onSelect={(id) => selectClip(id)}
+          onAdd={addClip}
+          onRemove={removeClip}
+          onTimingChange={updateClipTiming}
+        />
 
         <div className="stage-hud stage-hud-bottom stage-hud-desktop" aria-label="Shader playback controls">
           <div className="hud-playback">
@@ -3689,7 +3742,6 @@ export default function App() {
               onClick={() => {
                 setIsPaused(false);
                 setReplayNonce((value) => value + 1);
-                timelineDirRef.current = 1;
                 timelineTimeRef.current = 0;
                 setTimelineTime(0);
               }}
@@ -3761,7 +3813,7 @@ export default function App() {
                 : `${settings.particleCount.toLocaleString()} PARTICLES`}
             </span>
               <span>
-                {logoA.name || "A"} → {logoB.name || "B"}
+                {clips.map((clip, index) => clipLetter(index)).join(" → ")}
               </span>
             </div>
           <button
